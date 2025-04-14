@@ -34,7 +34,7 @@ jobs:
       - uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
-      - run: zig build -Dtarget=x86_64-windows.win7
+      - run: zig build "-Dtarget=x86_64-windows.win7"
       - run: |
           powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://github.com/free-audio/clap-validator/releases/download/0.3.2/clap-validator-0.3.2-windows.zip -OutFile clap-validator.zip"
           powershell -Command "Expand-Archive clap-validator.zip -DestinationPath ."
