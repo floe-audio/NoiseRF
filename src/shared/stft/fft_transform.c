@@ -22,33 +22,38 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../configurations.h"
 #include "../utils/general_utils.h"
 
-#include <fftw3.h>
+#include "pffft.h"
+#include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static uint32_t calculate_fft_size(FftTransform *self);
-static void allocate_fftw(FftTransform *self);
+static void allocate_pffft(FftTransform *self);
 
 struct FftTransform {
-  fftwf_plan forward;
-  fftwf_plan backward;
+  PFFFT_Setup *setup;
 
   uint32_t fft_size;
   uint32_t frame_size;
   uint32_t zeropadding_amount;
   uint32_t copy_position;
-  ZeroPaddingType padding_type;
   uint32_t padding_amount;
   float *input_fft_buffer;
   float *output_fft_buffer;
+  float *work_buffer; // Work buffer for PFFFT
 };
+
+static uint32_t calculate_fft_size(FftTransform *self) {
+  uint32_t next_power_of_two = get_next_power_two((int)self->frame_size);
+  self->padding_amount = next_power_of_two - self->frame_size;
+  return next_power_of_two < 32 ? 32 : next_power_of_two;
+}
 
 FftTransform *fft_transform_initialize(const uint32_t frame_size,
                                        const ZeroPaddingType padding_type,
                                        const uint32_t zeropadding_amount) {
   FftTransform *self = (FftTransform *)calloc(1U, sizeof(FftTransform));
 
-  self->padding_type = padding_type;
   self->zeropadding_amount = zeropadding_amount;
   self->frame_size = frame_size;
 
@@ -56,7 +61,7 @@ FftTransform *fft_transform_initialize(const uint32_t frame_size,
 
   self->copy_position = (self->fft_size / 2U) - (self->frame_size / 2U);
 
-  allocate_fftw(self);
+  allocate_pffft(self);
 
   return self;
 }
@@ -67,55 +72,53 @@ FftTransform *fft_transform_initialize_bins(const uint32_t fft_size) {
   self->fft_size = fft_size;
   self->frame_size = self->fft_size;
 
-  allocate_fftw(self);
+  allocate_pffft(self);
 
   return self;
 }
 
-static void allocate_fftw(FftTransform *self) {
-  self->input_fft_buffer =
-      (float *)fftwf_malloc(self->fft_size * sizeof(float));
-  self->output_fft_buffer =
-      (float *)fftwf_malloc(self->fft_size * sizeof(float));
-  self->forward =
-      fftwf_plan_r2r_1d((int)self->fft_size, self->input_fft_buffer,
-                        self->output_fft_buffer, FFTW_FORWARD, FFTW_ESTIMATE);
-  self->backward =
-      fftwf_plan_r2r_1d((int)self->fft_size, self->output_fft_buffer,
-                        self->input_fft_buffer, FFTW_BACKWARD, FFTW_ESTIMATE);
-}
+static void allocate_pffft(FftTransform *self) {
+  self->setup = pffft_new_setup(self->fft_size, PFFFT_REAL);
 
-static uint32_t calculate_fft_size(FftTransform *self) {
-  switch (self->padding_type) {
-  case NO_PADDING: {
-    self->padding_amount = 0;
-    return get_next_divisible_two((int)self->frame_size);
-  }
-  case NEXT_POWER_OF_TWO: {
-    uint32_t next_power_of_two = get_next_power_two((int)self->frame_size);
-    self->padding_amount = next_power_of_two - self->frame_size;
-    return next_power_of_two;
-  }
-  case FIXED_AMOUNT: {
-    self->padding_amount = self->zeropadding_amount;
-    return get_next_divisible_two(
-        (int)(self->frame_size + self->padding_amount));
-  }
-  default:
-    return get_next_divisible_two((int)self->frame_size);
-  }
+  assert(self->setup != NULL);
+
+  const size_t fft_size_bytes = self->fft_size * sizeof(float);
+
+  self->input_fft_buffer = (float *)pffft_aligned_malloc(fft_size_bytes);
+  self->output_fft_buffer = (float *)pffft_aligned_malloc(fft_size_bytes);
+
+  memset(self->input_fft_buffer, 0, fft_size_bytes);
+  memset(self->output_fft_buffer, 0, fft_size_bytes);
+
+  self->work_buffer = (float *)pffft_aligned_malloc(fft_size_bytes);
 }
 
 void fft_transform_free(FftTransform *self) {
-  fftwf_free(self->input_fft_buffer);
-  fftwf_free(self->output_fft_buffer);
-  fftwf_destroy_plan(self->forward);
-  fftwf_destroy_plan(self->backward);
+  if (!self) {
+    return;
+  }
+
+  if (self->input_fft_buffer) {
+    pffft_aligned_free(self->input_fft_buffer);
+  }
+
+  if (self->output_fft_buffer) {
+    pffft_aligned_free(self->output_fft_buffer);
+  }
+
+  if (self->work_buffer) {
+    pffft_aligned_free(self->work_buffer);
+  }
+
+  if (self->setup) {
+    pffft_destroy_setup(self->setup);
+  }
 
   free(self);
 }
 
 uint32_t get_fft_size(FftTransform *self) { return self->fft_size; }
+
 uint32_t get_fft_real_spectrum_size(FftTransform *self) {
   return self->fft_size / 2U + 1U;
 }
@@ -124,6 +127,9 @@ bool fft_load_input_samples(FftTransform *self, const float *input) {
   if (!self || !input) {
     return false;
   }
+
+  // Clear input buffer first
+  memset(self->input_fft_buffer, 0, self->fft_size * sizeof(float));
 
   // Copy centered values only
   for (uint32_t i = self->copy_position;
@@ -149,21 +155,23 @@ bool fft_get_output_samples(FftTransform *self, float *output) {
 }
 
 bool compute_forward_fft(FftTransform *self) {
-  if (!self) {
+  if (!self || !self->setup) {
     return false;
   }
 
-  fftwf_execute(self->forward);
+  pffft_transform_ordered(self->setup, self->input_fft_buffer,
+                          self->output_fft_buffer, NULL, PFFFT_FORWARD);
 
   return true;
 }
 
 bool compute_backward_fft(FftTransform *self) {
-  if (!self) {
+  if (!self || !self->setup) {
     return false;
   }
 
-  fftwf_execute(self->backward);
+  pffft_transform_ordered(self->setup, self->output_fft_buffer,
+                          self->input_fft_buffer, NULL, PFFFT_BACKWARD);
 
   return true;
 }

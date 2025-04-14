@@ -1,45 +1,38 @@
-# libspecbleach
+# NoiseRF
+## Noise Repellent Fork - CLAP plugin
 
-C library for audio noise reduction and other spectral effects
+This is a fork of Luciano Dato's noise reduction library [libspecbleach](https://github.com/lucianodato/libspecbleach) and LV2 plugin, [noise-repellent](https://github.com/lucianodato/noise-repellent).
 
-[![build](https://github.com/lucianodato/libspecbleach/actions/workflows/build.yml/badge.svg)](https://github.com/lucianodato/libspecbleach/actions/workflows/build.yml)
+It's licensed under LGPLv3.
 
-## Background
+As of writing this (April 2024), the original version is not maintained, and has tricky dependencies for compiling on all 3 OS. This version differs from the original library and plugin in the following ways:
+- It is a CLAP plugin instead of LV2 (still supports Linux, macOS, and Windows)
+- It uses pffft instead of fftw3
+- It uses Zig for the build system allowing for simple compilation across all platforms
+- There is no adaptive mode
+- There is no mono mode. Only stereo.
+- It fixes state saving
+- The library code (libspecbleach) and plugin code (noise-repellent) are in a single repository - this was just done for convenience
 
-This library is based on the algorithms that were used in [noise-repellent](https://github.com/lucianodato/noise-repellent). These were extracted into a this standalone library to remove the lv2 dependency. It was design to be extensible and modular. It uses the concept of a spectral processor which itself uses a short time Fourier transform (STFT) to process the audio. There are two initial processors in place, one which uses the adaptive part of noise repellent and one that uses the manual capturing profile based denoising. The library could be extended with more spectral processors using any STFT-based algorithm such as de-crackle, de-click and other audio restoration algorithms.
+## Building
+Zig 0.13.0 is required. Cross-compiling is easy: `zig build -Dtarget=x86_64-linux`, `zig build -Dtarget=x86_64-windows`, `zig build -Dtarget=aarch64-macos`. Binaries are placed in `zig-out` folder. See `zig build --help` for more options.
 
-## De-noise algorithms
+## Installation
+Place the plugin in the appropriate directory for your OS:
+Linux:
+  - ~/.clap
+  - /usr/lib/clap
 
-There several techniques implemented in the library that are being used in the denoisers, such as masking thresholds estimation, onset detectors, etc. All these are being used in conjunction to improve the very basic spectral substraction algorithm. Most of the papers used are listed in the wiki of the project. Also a block diagram is provided to explain the reduction architecture.
+Windows:
+  - %COMMONPROGRAMFILES%\CLAP
+  - %LOCALAPPDATA%\Programs\Common\CLAP
 
-## Build
+MacOS;
+  - /Library/Audio/Plug-Ins/CLAP
+  - ~/Library/Audio/Plug-Ins/CLAP
 
-If you wish to compile yourself and install the library you will need the a C compiling toolchain, Meson build system, ninja compiler, git and fftw3 library.
+## Dependencies
+We've removed the fftw3 dependency, so only glibc is needed on Linux.
 
-Installation:
-
-```bash
-  git clone https://github.com/lucianodato/noise-repellent.git
-  cd noise-repellent
-  meson build --buildtype=release --prefix=/usr --libdir=lib (your-os-appropriate-location-fullpath)
-  meson compile -C build -v
-  sudo meson install -C build
-```
-
-## Example
-
-Simple console apps examples are provided to demonstrate how to use the library. It needs libsndfile to compile successfully. You can use them as follows:
-
-Adaptive noise learn
-
-```bash
-  adenoise_demo <input file name> <output file name>
-```
-
-Manual noise learn
-
-```bash
-  denoise_demo <input file name> <output file name>
-```
-
-It will recognize any libsndfile supported format.
+## Usage
+See the original wiki: https://github.com/lucianodato/noise-repellent/wiki

@@ -1,0 +1,892 @@
+// Copyright 2025 Sam Windell
+// SPDX-License-Identifier: LGPL-3.0
+//
+// This file is a CLAP adaptation of the noise-repellent plugin
+// Originally from: https://github.com/lucianodato/noise-repellent
+//
+// clap-c99-distortion was used as a template for the CLAP interface:
+// https://github.com/baconpaul/clap-c99-distortion
+// Copyright 2022, Paul Walker and others as listed in the git history
+// SPDX-License-Identifier: MIT
+
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <assert.h>
+#include <clap/clap.h>
+#include <math.h>
+
+#include "config.h"
+#include "signal_crossfade.h"
+#include "specbleach_denoiser.h"
+
+static const clap_plugin_descriptor_t s_noise_repellent_desc = {
+    .clap_version = CLAP_VERSION_INIT,
+    .id = PROJECT_ID,
+    .name = PROJECT_NAME,
+    .vendor = PROJECT_VENDOR,
+    .url = PROJECT_URL,
+    .manual_url = "",
+    .support_url = "",
+    .version = PROJECT_VERSION,
+    .description = PROJECT_DESCRIPTION,
+    .features = (const char *[]){CLAP_PLUGIN_FEATURE_AUDIO_EFFECT,
+                                 CLAP_PLUGIN_FEATURE_STEREO, NULL},
+};
+
+enum ParamIds {
+  pid_AMOUNT = 238,
+  pid_OFFSET = 1923048,
+  pid_SMOOTHING = 349857,
+  pid_WHITENING = 12357,
+  pid_TRANSIENT_PROTECTION = 329847,
+  pid_LEARN_NOISE = 57433,
+  pid_RESIDUAL_LISTEN = 56201,
+  pid_RESET_PROFILE = 453689734,
+  pid_ENABLE = 239487
+};
+
+#define PARAMS_COUNT 9
+#define NOISE_PROFILE_MAX_SIZE 8192
+
+typedef struct {
+  float left[NOISE_PROFILE_MAX_SIZE];
+  float right[NOISE_PROFILE_MAX_SIZE];
+  uint32_t blocks_averaged;
+  uint32_t size;
+} noise_profile_state;
+
+#define TRIPLE_BUFFER_DIRTY_BIT (1u << 31)
+#define TRIPLE_BUFFER_MASK (~TRIPLE_BUFFER_DIRTY_BIT)
+
+typedef struct {
+  noise_profile_state buffers[3];
+  _Atomic uint32_t middle_buffer_state; // producer and consumer
+  uint32_t back_buffer_index;           // producer
+  uint32_t front_buffer_index;          // consumer
+} noise_profile_state_swap_buffers;
+
+// producer
+static noise_profile_state *
+writable_noise_profile_state(noise_profile_state_swap_buffers *buffers) {
+  return &buffers->buffers[buffers->back_buffer_index];
+}
+
+// producer
+static void
+publish_noise_profile_state(noise_profile_state_swap_buffers *buffers) {
+  const uint32_t old_middle_state =
+      atomic_exchange(&buffers->middle_buffer_state,
+                      buffers->back_buffer_index | TRIPLE_BUFFER_DIRTY_BIT);
+  buffers->back_buffer_index = old_middle_state & TRIPLE_BUFFER_MASK;
+}
+
+// consumer
+bool noise_profile_state_consume(noise_profile_state_swap_buffers *buffers,
+                                 noise_profile_state **out_state) {
+  if (!(buffers->middle_buffer_state & TRIPLE_BUFFER_DIRTY_BIT)) {
+    *out_state = &buffers->buffers[buffers->front_buffer_index];
+    return false;
+  }
+
+  const uint32_t prev = atomic_exchange(&buffers->middle_buffer_state,
+                                        buffers->front_buffer_index);
+  buffers->front_buffer_index = prev & TRIPLE_BUFFER_MASK;
+  *out_state = &buffers->buffers[buffers->front_buffer_index];
+  return true;
+}
+
+typedef struct {
+  clap_plugin_t plugin;
+  const clap_host_t *host;
+  const clap_host_latency_t *hostLatency;
+  const clap_host_log_t *hostLog;
+  const clap_host_thread_check_t *hostThreadCheck;
+  const clap_host_params_t *hostParams;
+
+  _Atomic float amount;
+  _Atomic float offset;
+  _Atomic float smoothing;
+  _Atomic float whitening;
+  _Atomic bool transient_protection;
+  _Atomic bool learn_noise;
+  _Atomic bool residual_listen;
+  _Atomic bool reset_profile;
+  _Atomic bool enable;
+
+  // We use atomic triple buffers for the noise profile state to allow for
+  // thread-safe communication between the main thread (which does loading and
+  // saving), and the audio thread (which does processing).
+  noise_profile_state_swap_buffers pending_noise_profile_change;
+  noise_profile_state_swap_buffers current_noise_profile;
+
+  SignalCrossfade *soft_bypass;
+  SpectralBleachHandle lib_instance_1;
+  SpectralBleachHandle lib_instance_2;
+  float noise_profile_1[NOISE_PROFILE_MAX_SIZE]; // audio thread
+  float noise_profile_2[NOISE_PROFILE_MAX_SIZE]; // audio thread
+} clap_noise_repellent;
+
+static void noise_repellent_process_event(clap_noise_repellent *plug,
+                                          const clap_event_header_t *hdr);
+
+/////////////////////////////
+// clap_plugin_audio_ports //
+/////////////////////////////
+
+static uint32_t noise_repellent_audio_ports_count(const clap_plugin_t *plugin,
+                                                  bool is_input) {
+  return 1;
+}
+
+static bool noise_repellent_audio_ports_get(const clap_plugin_t *plugin,
+                                            uint32_t index, bool is_input,
+                                            clap_audio_port_info_t *info) {
+  if (index > 0)
+    return false;
+  info->id = 0;
+  if (is_input)
+    snprintf(info->name, sizeof(info->name), "%s", "Stereo In");
+  else
+    snprintf(info->name, sizeof(info->name), "%s", "Stereo Out");
+  info->channel_count = 2;
+  info->flags = CLAP_AUDIO_PORT_IS_MAIN;
+  info->port_type = CLAP_PORT_STEREO;
+  info->in_place_pair = CLAP_INVALID_ID;
+  return true;
+}
+
+static const clap_plugin_audio_ports_t s_noise_repellent_audio_ports = {
+    .count = noise_repellent_audio_ports_count,
+    .get = noise_repellent_audio_ports_get,
+};
+
+//////////////////
+// clap_latency //
+//////////////////
+
+uint32_t noise_repellent_latency_get(const clap_plugin_t *plugin) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+  if (!plug->lib_instance_1) {
+    return 0;
+  }
+  return specbleach_get_latency(plug->lib_instance_1);
+}
+
+static const clap_plugin_latency_t s_noise_repellent_latency = {
+    .get = noise_repellent_latency_get,
+};
+
+//////////////////
+// clap_params //
+//////////////////
+
+static void set_value(clap_noise_repellent *plug, uint32_t param_id,
+                      double value) {
+  switch (param_id) {
+  case pid_AMOUNT:
+    plug->amount = value;
+    break;
+  case pid_OFFSET:
+    plug->offset = value;
+    break;
+  case pid_SMOOTHING:
+    plug->smoothing = value;
+    break;
+  case pid_WHITENING:
+    plug->whitening = value;
+    break;
+  case pid_TRANSIENT_PROTECTION:
+    plug->transient_protection = value >= 0.5;
+    break;
+  case pid_LEARN_NOISE:
+    plug->learn_noise = value >= 0.5;
+    break;
+  case pid_RESIDUAL_LISTEN:
+    plug->residual_listen = value >= 0.5;
+    break;
+  case pid_RESET_PROFILE:
+    plug->reset_profile = value >= 0.5;
+    break;
+  case pid_ENABLE:
+    plug->enable = value >= 0.5;
+    break;
+  }
+}
+
+uint32_t noise_repellent_param_count(const clap_plugin_t *plugin) {
+  return PARAMS_COUNT;
+}
+
+bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
+                                    uint32_t param_index,
+                                    clap_param_info_t *param_info) {
+  *param_info = (clap_param_info_t){};
+  switch (param_index) {
+  case 0: // amount
+    param_info->id = pid_AMOUNT;
+    strncpy(param_info->name, "Reduction Amount", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 10.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 40.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+    param_info->cookie = NULL;
+    break;
+  case 1: // offset
+    param_info->id = pid_OFFSET;
+    strncpy(param_info->name, "Reduction Strength", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 2.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 12.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+    param_info->cookie = NULL;
+    break;
+  case 2: // smoothing
+    param_info->id = pid_SMOOTHING;
+    strncpy(param_info->name, "Smoothing", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 0.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 100.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+    param_info->cookie = NULL;
+    break;
+  case 3: // whitening
+    param_info->id = pid_WHITENING;
+    strncpy(param_info->name, "Residual Whitening", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 0.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 100.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+    param_info->cookie = NULL;
+    break;
+  case 4: // transient protection
+    param_info->id = pid_TRANSIENT_PROTECTION;
+    strncpy(param_info->name, "Protect Transients", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 0.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 1.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
+    param_info->cookie = NULL;
+    break;
+  case 5: // learn noise
+    param_info->id = pid_LEARN_NOISE;
+    strncpy(param_info->name, "Learn Noise Profile", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 0.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 1.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
+    param_info->cookie = NULL;
+    break;
+  case 6: // residual listen
+    param_info->id = pid_RESIDUAL_LISTEN;
+    strncpy(param_info->name, "Residual Listen", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 0.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 1.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
+    param_info->cookie = NULL;
+    break;
+  case 7: // reset profile
+    param_info->id = pid_RESET_PROFILE;
+    strncpy(param_info->name, "Reset Noise Profile", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 0.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 1.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
+    param_info->cookie = NULL;
+    break;
+  case 8: // enable
+    param_info->id = pid_ENABLE;
+    strncpy(param_info->name, "Enable", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 1.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 1.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
+    param_info->cookie = NULL;
+    break;
+  default:
+    return false;
+  }
+  return true;
+}
+
+bool noise_repellent_param_get_value(const clap_plugin_t *plugin,
+                                     clap_id param_id, double *value) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+
+  switch (param_id) {
+  case pid_AMOUNT:
+    *value = plug->amount;
+    return true;
+  case pid_OFFSET:
+    *value = plug->offset;
+    return true;
+  case pid_SMOOTHING:
+    *value = plug->smoothing;
+    return true;
+  case pid_WHITENING:
+    *value = plug->whitening;
+    return true;
+  case pid_TRANSIENT_PROTECTION:
+    *value = plug->transient_protection ? 1.0 : 0.0;
+    return true;
+  case pid_LEARN_NOISE:
+    *value = plug->learn_noise ? 1.0 : 0.0;
+    return true;
+  case pid_RESIDUAL_LISTEN:
+    *value = plug->residual_listen ? 1.0 : 0.0;
+    return true;
+  case pid_RESET_PROFILE:
+    *value = plug->reset_profile ? 1.0 : 0.0;
+    return true;
+  case pid_ENABLE:
+    *value = plug->enable ? 1.0 : 0.0;
+    return true;
+  }
+
+  return false;
+}
+
+bool noise_repellent_param_value_to_text(const clap_plugin_t *plugin,
+                                         clap_id param_id, double value,
+                                         char *display, uint32_t size) {
+  switch (param_id) {
+  case pid_AMOUNT:
+  case pid_OFFSET:
+    snprintf(display, size, "%.1f dB", value);
+    return true;
+  case pid_SMOOTHING:
+  case pid_WHITENING:
+    snprintf(display, size, "%.1f %%", value);
+    return true;
+  case pid_TRANSIENT_PROTECTION:
+    snprintf(display, size, value >= 0.5 ? "On" : "Off");
+    return true;
+  case pid_LEARN_NOISE:
+    snprintf(display, size, value >= 0.5 ? "Learning" : "Not Learning");
+    return true;
+  case pid_RESIDUAL_LISTEN:
+    snprintf(display, size, value >= 0.5 ? "Residual" : "Output");
+    return true;
+  case pid_RESET_PROFILE:
+    snprintf(display, size, value >= 0.5 ? "Reset" : "Normal");
+    return true;
+  case pid_ENABLE:
+    snprintf(display, size, value >= 0.5 ? "Enabled" : "Bypassed");
+    return true;
+  }
+  return false;
+}
+
+bool noise_repellent_text_to_value(const clap_plugin_t *plugin,
+                                   clap_id param_id, const char *display,
+                                   double *value) {
+  // Not implemented
+  return false;
+}
+
+void noise_repellent_flush(const clap_plugin_t *plugin,
+                           const clap_input_events_t *in,
+                           const clap_output_events_t *out) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+  int s = in->size(in);
+  int q;
+  for (q = 0; q < s; ++q) {
+    const clap_event_header_t *hdr = in->get(in, q);
+    noise_repellent_process_event(plug, hdr);
+  }
+}
+
+static const clap_plugin_params_t s_noise_repellent_params = {
+    .count = noise_repellent_param_count,
+    .get_info = noise_repellent_param_get_info,
+    .get_value = noise_repellent_param_get_value,
+    .value_to_text = noise_repellent_param_value_to_text,
+    .text_to_value = noise_repellent_text_to_value,
+    .flush = noise_repellent_flush};
+
+/////////////////
+// clap_state //
+/////////////////
+
+static bool read_from_stream(const clap_istream_t *stream, void *buffer,
+                             size_t size) {
+  size_t bytes_read = 0;
+  while (bytes_read != size) {
+    const int64_t n =
+        stream->read(stream, (uint8_t *)buffer + bytes_read, size - bytes_read);
+    if (n == 0)
+      return false; // unexpected end of stream
+    if (n < 0)
+      return false; // error
+    bytes_read += (size_t)n;
+  }
+  return true;
+}
+
+static bool write_to_stream(const clap_ostream_t *stream, const void *buffer,
+                            size_t size) {
+  size_t bytes_written = 0;
+  while (bytes_written != size) {
+    const int64_t n = stream->write(
+        stream, (const uint8_t *)buffer + bytes_written, size - bytes_written);
+    if (n < 0)
+      return false; // error
+    bytes_written += (size_t)n;
+  }
+  return true;
+}
+
+enum CodingMode {
+  coding_ENCODE,
+  coding_DECODE,
+};
+
+// Coder as in encoder/decoder
+struct state_coder {
+  enum CodingMode mode;
+  const clap_istream_t *istream; // when mode == coding_DECODE
+  const clap_ostream_t *ostream; // when mode == coding_ENCODE
+};
+
+static bool code(const struct state_coder *coder, const void *buffer,
+                 size_t size) {
+  if (coder->mode == coding_ENCODE) {
+    return write_to_stream(coder->ostream, buffer, size);
+  } else {
+    return read_from_stream(coder->istream, (void *)buffer, size);
+  }
+}
+
+static bool noise_repellent_code_state(const clap_plugin_t *plugin,
+                                       const struct state_coder *coder) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+
+  // We might need to use this in the future.
+  uint32_t version = 1;
+  if (!code(coder, &version, sizeof(version))) {
+    return false;
+  }
+
+  uint32_t params_count = PARAMS_COUNT;
+  if (!code(coder, &params_count, sizeof(params_count))) {
+    return false;
+  }
+
+  for (uint32_t i = 0; i < params_count; ++i) {
+    uint32_t param_id;
+    if (coder->mode == coding_ENCODE) {
+      clap_param_info_t param_info;
+      const bool got_info =
+          noise_repellent_param_get_info(plugin, i, &param_info);
+      assert(got_info);
+      param_id = param_info.id;
+    }
+    if (!code(coder, &param_id, sizeof(param_id))) {
+      return false;
+    }
+
+    double value = 0.0;
+    if (coder->mode == coding_ENCODE) {
+      const bool got_value =
+          noise_repellent_param_get_value(plugin, param_id, &value);
+      assert(got_value);
+    }
+    if (!code(coder, &value, sizeof(value))) {
+      return false;
+    }
+
+    if (coder->mode == coding_DECODE) {
+      set_value(plug, param_id, value);
+    }
+  }
+
+  noise_profile_state *state;
+  if (coder->mode == coding_DECODE) {
+    state = writable_noise_profile_state(&plug->pending_noise_profile_change);
+  } else {
+    noise_profile_state_consume(&plug->current_noise_profile, &state);
+  }
+
+  assert(state->size <= NOISE_PROFILE_MAX_SIZE);
+  if (!code(coder, &state->blocks_averaged, sizeof(state->blocks_averaged))) {
+    return false;
+  }
+  if (!code(coder, &state->size, sizeof(state->size))) {
+    return false;
+  }
+  if (!code(coder, state->left, sizeof(float) * state->size)) {
+    return false;
+  }
+  if (!code(coder, state->right, sizeof(float) * state->size)) {
+    return false;
+  }
+
+  if (coder->mode == coding_DECODE) {
+    publish_noise_profile_state(&plug->pending_noise_profile_change);
+  }
+
+  return true;
+}
+
+bool noise_repellent_state_save(const clap_plugin_t *plugin,
+                                const clap_ostream_t *stream) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+
+  const struct state_coder coder = {
+      .mode = coding_ENCODE,
+      .ostream = stream,
+  };
+
+  return noise_repellent_code_state(plugin, &coder);
+}
+
+bool noise_repellent_state_load(const clap_plugin_t *plugin,
+                                const clap_istream_t *stream) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+
+  const struct state_coder coder = {
+      .mode = coding_DECODE,
+      .istream = stream,
+  };
+
+  const bool result = noise_repellent_code_state(plugin, &coder);
+
+  // Notify host that parameter values might have changed
+  const clap_host_t *clapHost = plug->host;
+  const clap_host_params_t *p =
+      (const clap_host_params_t *)(clapHost->get_extension(clapHost,
+                                                           CLAP_EXT_PARAMS));
+  if (p) {
+    p->rescan(clapHost, CLAP_PARAM_RESCAN_VALUES);
+    p->request_flush(clapHost);
+  }
+
+  return result;
+}
+
+static const clap_plugin_state_t s_noise_repellent_state = {
+    .save = noise_repellent_state_save,
+    .load = noise_repellent_state_load,
+};
+
+/////////////////
+// clap_plugin //
+/////////////////
+
+static bool noise_repellent_init(const struct clap_plugin *plugin) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+
+  // Fetch host's extensions here
+  plug->hostLog = plug->host->get_extension(plug->host, CLAP_EXT_LOG);
+  plug->hostThreadCheck =
+      plug->host->get_extension(plug->host, CLAP_EXT_THREAD_CHECK);
+  plug->hostLatency = plug->host->get_extension(plug->host, CLAP_EXT_LATENCY);
+  plug->hostParams = plug->host->get_extension(plug->host, CLAP_EXT_PARAMS);
+
+  for (uint32_t i = 0; i < PARAMS_COUNT; ++i) {
+    clap_param_info_t param_info;
+    noise_repellent_param_get_info(plugin, i, &param_info);
+    set_value(plug, param_info.id, param_info.default_value);
+  }
+
+  return true;
+}
+
+static void noise_repellent_destroy(const struct clap_plugin *plugin) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+
+  free(plug);
+}
+
+static bool noise_repellent_activate(const struct clap_plugin *plugin,
+                                     double sample_rate,
+                                     uint32_t min_frames_count,
+                                     uint32_t max_frames_count) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+
+  plug->soft_bypass = signal_crossfade_initialize((uint32_t)sample_rate);
+  if (!plug->soft_bypass) {
+    return false;
+  }
+
+  const float frame_size_ms = 46;
+
+  plug->lib_instance_1 =
+      specbleach_initialize((uint32_t)sample_rate, frame_size_ms);
+  if (!plug->lib_instance_1) {
+    return false;
+  }
+
+  plug->lib_instance_2 =
+      specbleach_initialize((uint32_t)sample_rate, frame_size_ms);
+  if (!plug->lib_instance_2) {
+    specbleach_free(plug->lib_instance_1);
+    return false;
+  }
+
+  assert(specbleach_get_noise_profile_size(plug->lib_instance_1) <=
+         NOISE_PROFILE_MAX_SIZE);
+
+  return true;
+}
+
+static void noise_repellent_deactivate(const struct clap_plugin *plugin) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+
+  if (plug->lib_instance_1) {
+    specbleach_free(plug->lib_instance_1);
+  }
+
+  if (plug->lib_instance_2) {
+    specbleach_free(plug->lib_instance_2);
+  }
+
+  if (plug->soft_bypass) {
+    signal_crossfade_free(plug->soft_bypass);
+  }
+}
+
+static bool noise_repellent_start_processing(const struct clap_plugin *plugin) {
+  return true;
+}
+
+static void noise_repellent_stop_processing(const struct clap_plugin *plugin) {}
+
+static void noise_repellent_reset(const struct clap_plugin *plugin) {}
+
+static void noise_repellent_process_event(clap_noise_repellent *plug,
+                                          const clap_event_header_t *hdr) {
+  if (hdr->space_id == CLAP_CORE_EVENT_SPACE_ID) {
+    switch (hdr->type) {
+    case CLAP_EVENT_PARAM_VALUE: {
+      const clap_event_param_value_t *ev =
+          (const clap_event_param_value_t *)hdr;
+
+      set_value(plug, ev->param_id, ev->value);
+      break;
+    }
+    }
+  }
+}
+
+static clap_process_status
+noise_repellent_process(const struct clap_plugin *plugin,
+                        const clap_process_t *process) {
+  clap_noise_repellent *plug = plugin->plugin_data;
+  const uint32_t nframes = process->frames_count;
+  const uint32_t nev = process->in_events->size(process->in_events);
+  uint32_t ev_index = 0;
+  uint32_t next_ev_frame = nev > 0 ? 0 : nframes;
+
+  // Update the parameters struct for the spectral bleach instances
+  SpectralBleachParameters parameters = {
+      .learn_noise = plug->learn_noise,
+      .residual_listen = plug->residual_listen,
+      .reduction_amount = plug->amount,
+      .smoothing_factor = plug->smoothing,
+      .transient_protection = plug->transient_protection,
+      .whitening_factor = plug->whitening,
+      .noise_scaling_type = 1,
+      .noise_rescale = plug->offset,
+      .post_filter_threshold = 0.0f,
+  };
+
+  // Load parameters into both instances
+  specbleach_load_parameters(plug->lib_instance_1, parameters);
+  specbleach_load_parameters(plug->lib_instance_2, parameters);
+
+  // Consume pending noise profile changes
+  {
+    noise_profile_state *state;
+    if (noise_profile_state_consume(&plug->pending_noise_profile_change,
+                                    &state)) {
+      specbleach_load_noise_profile(plug->lib_instance_1, state->left,
+                                    state->size, state->blocks_averaged);
+      specbleach_load_noise_profile(plug->lib_instance_2, state->right,
+                                    state->size, state->blocks_averaged);
+    }
+  }
+
+  // Handle reset noise profile if needed
+  if (plug->reset_profile) {
+    specbleach_reset_noise_profile(plug->lib_instance_1);
+    specbleach_reset_noise_profile(plug->lib_instance_2);
+    plug->reset_profile = false; // Reset the trigger
+  }
+
+  for (uint32_t i = 0; i < nframes;) {
+    /* handle every events that happens at the frame "i" */
+    while (ev_index < nev && next_ev_frame == i) {
+      const clap_event_header_t *hdr =
+          process->in_events->get(process->in_events, ev_index);
+      if (hdr->time != i) {
+        next_ev_frame = hdr->time;
+        break;
+      }
+
+      noise_repellent_process_event(plug, hdr);
+      ++ev_index;
+
+      if (ev_index == nev) {
+        // we reached the end of the event list
+        next_ev_frame = nframes;
+        break;
+      }
+    }
+
+    /* process audio until the next event */
+    const uint32_t block_size = next_ev_frame - i;
+
+    // Process left channel
+    specbleach_process(plug->lib_instance_1, block_size,
+                       &process->audio_inputs[0].data32[0][i],
+                       &process->audio_outputs[0].data32[0][i]);
+
+    // Process right channel
+    specbleach_process(plug->lib_instance_2, block_size,
+                       &process->audio_inputs[0].data32[1][i],
+                       &process->audio_outputs[0].data32[1][i]);
+
+    // Apply soft bypass if needed
+    signal_crossfade_run(plug->soft_bypass, block_size,
+                         &process->audio_inputs[0].data32[0][i],
+                         &process->audio_outputs[0].data32[0][i], plug->enable);
+
+    signal_crossfade_run(plug->soft_bypass, block_size,
+                         &process->audio_inputs[0].data32[1][i],
+                         &process->audio_outputs[0].data32[1][i], plug->enable);
+
+    i = next_ev_frame;
+  }
+
+  // Store the noise profile
+  {
+    noise_profile_state *state =
+        writable_noise_profile_state(&plug->current_noise_profile);
+    state->size = specbleach_get_noise_profile_size(plug->lib_instance_1);
+    state->blocks_averaged =
+        specbleach_get_noise_profile_blocks_averaged(plug->lib_instance_1);
+    assert(state->size <= NOISE_PROFILE_MAX_SIZE);
+    memcpy(state->left, specbleach_get_noise_profile(plug->lib_instance_1),
+           sizeof(float) * state->size);
+    memcpy(state->right, specbleach_get_noise_profile(plug->lib_instance_2),
+           sizeof(float) * state->size);
+    publish_noise_profile_state(&plug->current_noise_profile);
+  }
+
+  return CLAP_PROCESS_CONTINUE;
+}
+
+static const void *
+noise_repellent_get_extension(const struct clap_plugin *plugin,
+                              const char *id) {
+  if (!strcmp(id, CLAP_EXT_LATENCY))
+    return &s_noise_repellent_latency;
+  if (!strcmp(id, CLAP_EXT_AUDIO_PORTS))
+    return &s_noise_repellent_audio_ports;
+  if (!strcmp(id, CLAP_EXT_PARAMS))
+    return &s_noise_repellent_params;
+  if (!strcmp(id, CLAP_EXT_STATE))
+    return &s_noise_repellent_state;
+  return NULL;
+}
+
+static void noise_repellent_on_main_thread(const struct clap_plugin *plugin) {}
+
+clap_plugin_t *noise_repellent_create(const clap_host_t *host) {
+  clap_noise_repellent *p = calloc(1, sizeof(*p));
+  p->host = host;
+  p->plugin.desc = &s_noise_repellent_desc;
+  p->plugin.plugin_data = p;
+  p->plugin.init = noise_repellent_init;
+  p->plugin.destroy = noise_repellent_destroy;
+  p->plugin.activate = noise_repellent_activate;
+  p->plugin.deactivate = noise_repellent_deactivate;
+  p->plugin.start_processing = noise_repellent_start_processing;
+  p->plugin.stop_processing = noise_repellent_stop_processing;
+  p->plugin.reset = noise_repellent_reset;
+  p->plugin.process = noise_repellent_process;
+  p->plugin.get_extension = noise_repellent_get_extension;
+  p->plugin.on_main_thread = noise_repellent_on_main_thread;
+
+  return &p->plugin;
+}
+
+/////////////////////////
+// clap_plugin_factory //
+/////////////////////////
+
+static struct {
+  const clap_plugin_descriptor_t *desc;
+  clap_plugin_t *(*create)(const clap_host_t *host);
+} s_plugins[] = {
+    {
+        .desc = &s_noise_repellent_desc,
+        .create = noise_repellent_create,
+    },
+};
+
+static uint32_t
+plugin_factory_get_plugin_count(const struct clap_plugin_factory *factory) {
+  return sizeof(s_plugins) / sizeof(s_plugins[0]);
+}
+
+static const clap_plugin_descriptor_t *
+plugin_factory_get_plugin_descriptor(const struct clap_plugin_factory *factory,
+                                     uint32_t index) {
+  return s_plugins[index].desc;
+}
+
+static const clap_plugin_t *
+plugin_factory_create_plugin(const struct clap_plugin_factory *factory,
+                             const clap_host_t *host, const char *plugin_id) {
+  if (!clap_version_is_compatible(host->clap_version)) {
+    return NULL;
+  }
+
+  const int N = sizeof(s_plugins) / sizeof(s_plugins[0]);
+  for (int i = 0; i < N; ++i)
+    if (!strcmp(plugin_id, s_plugins[i].desc->id))
+      return s_plugins[i].create(host);
+
+  return NULL;
+}
+
+static const clap_plugin_factory_t s_plugin_factory = {
+    .get_plugin_count = plugin_factory_get_plugin_count,
+    .get_plugin_descriptor = plugin_factory_get_plugin_descriptor,
+    .create_plugin = plugin_factory_create_plugin,
+};
+
+////////////////
+// clap_entry //
+////////////////
+
+static bool entry_init(const char *plugin_path) { return true; }
+
+static void entry_deinit(void) {}
+
+static const void *entry_get_factory(const char *factory_id) {
+  if (!strcmp(factory_id, CLAP_PLUGIN_FACTORY_ID))
+    return &s_plugin_factory;
+  return NULL;
+}
+
+CLAP_EXPORT const clap_plugin_entry_t clap_entry = {
+    .clap_version = CLAP_VERSION_INIT,
+    .init = entry_init,
+    .deinit = entry_deinit,
+    .get_factory = entry_get_factory,
+};

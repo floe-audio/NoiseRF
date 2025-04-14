@@ -9,18 +9,16 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
         with:
-          submodules: recursive
-      - name: Set up dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -qq python3-pip libfftw3-dev ninja-build libsndfile1-dev
-          sudo pip install meson
-      - name: Build library
-        shell: bash
-        run: |
-          meson build --buildtype release
-          meson compile -v -C build
+          version: 0.13.0
+      - run: zig build -Dtarget=x86_64-linux
+      - run: zig build -Dtarget=aarch64-linux
+      - run: zig build -Dtarget=x86_64-macos.11.0.0
+      - run: zig build -Dtarget=aarch64-macos.11.0.0
+      - run: zig build -Dtarget=x86_64-windows.win7
+      - run: zig build -Dtarget=aarch64-windows
+

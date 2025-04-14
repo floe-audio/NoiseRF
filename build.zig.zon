@@ -1,0 +1,23 @@
+.{
+    .name = "libspecbleach",
+
+    .version = "0.0.0",
+
+    .dependencies = .{
+        .pffft = .{
+            .url = "https://bitbucket.org/jpommier/pffft/get/d7a4c0206a29423478776d6b23a37bbb308f21d5.zip",
+            .hash = "1220ae57a2c0ce938e80c9d669ace81fd0c3838a4bdab068c0e8aa68aa721710698c",
+        },
+        .clap = .{
+            .url = "https://github.com/free-audio/clap/archive/refs/tags/1.2.3.tar.gz",
+            .hash = "1220c6534f5ec8d81d53df7f4e2c6e4274ba13b74bab56d296f34085e23fd7d243ba",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "plugin",
+    },
+}

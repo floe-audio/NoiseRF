@@ -1,0 +1,33 @@
+name: release
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+      - run: zig build -Dtarget=x86_64-linux -Doptimize=ReleaseFast
+      - run: zig build -Dtarget=aarch64-linux -Doptimize=ReleaseFast
+      - run: zig build -Dtarget=x86_64-macos.11.0.0 -Doptimize=ReleaseFast
+      - run: zig build -Dtarget=aarch64-macos.11.0.0 -Doptimize=ReleaseFast
+      - run: zig build -Dtarget=x86_64-windows.win7 -Doptimize=ReleaseFast
+      - run: zig build -Dtarget=aarch64-windows -Doptimize=ReleaseFast
+      - run: |
+          mkdir -p release
+          (cd zig-out/x86_64-linux-gnu && zip -r ../../release/NoiseRF-Linux-x86_64.zip *)
+          (cd zig-out/aarch64-linux-gnu && zip -r ../../release/NoiseRF-Linux-aarch64.zip *)
+          (cd zig-out/x86_64-macos-none && zip -r ../../release/NoiseRF-Mac-x86_64.zip *)
+          (cd zig-out/aarch64-macos-none && zip -r ../../release/NoiseRF-Mac-aarch64.zip *)
+          (cd zig-out/x86_64-windows-gnu && zip -r ../../release/NoiseRF-Win-x86_64.zip *)
+          (cd zig-out/aarch64-windows-gnu && zip -r ../../release/NoiseRF-Win-aarch64.zip *)
+
+      - uses: ncipollo/release-action@v1
+        with:
+          generateReleaseNotes: true
+          artifacts: "release/*.zip"

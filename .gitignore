@@ -53,6 +53,8 @@ dkms.conf
 
 # Builds
 build/
+.zig-cache/
+zig-out/
 
 # Valgrind dumps
 *.valgrind
