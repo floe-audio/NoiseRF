@@ -15,8 +15,8 @@ jobs:
       - uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
-      - run: zig build -Dtarget=x86_64-linux
-      - run: zig build -Dtarget=aarch64-linux
+      - run: zig build -Dtarget=x86_64-linux-gnu
+      - run: zig build -Dtarget=aarch64-linux-gnu
       - run: zig build -Dtarget=x86_64-macos.11.0.0
       - run: zig build -Dtarget=aarch64-macos.11.0.0
       - run: zig build -Dtarget=x86_64-windows.win7
