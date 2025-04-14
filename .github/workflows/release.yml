@@ -20,6 +20,7 @@ jobs:
       - run: zig build -Dtarget=aarch64-windows -Doptimize=ReleaseFast
       - run: |
           mkdir -p release
+          find zig-out
           (cd zig-out/x86_64-linux-gnu && zip -r ../../release/NoiseRF-Linux-x86_64.zip *)
           (cd zig-out/aarch64-linux-gnu && zip -r ../../release/NoiseRF-Linux-aarch64.zip *)
           (cd zig-out/x86_64-macos-none && zip -r ../../release/NoiseRF-Mac-x86_64.zip *)

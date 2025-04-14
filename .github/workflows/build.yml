@@ -21,4 +21,5 @@ jobs:
       - run: zig build -Dtarget=aarch64-macos.11.0.0
       - run: zig build -Dtarget=x86_64-windows.win7
       - run: zig build -Dtarget=aarch64-windows
+      - run: find zig-out
 
