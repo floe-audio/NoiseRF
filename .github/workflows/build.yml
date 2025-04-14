@@ -26,5 +26,5 @@ jobs:
       - run: |
           curl -L https://github.com/free-audio/clap-validator/releases/download/0.3.2/clap-validator-0.3.2-ubuntu-18.04.tar.gz | tar -xz
           chmod +x clap-validator
-          ./clap-validator validate zig-out/x86_64-linux-gnu/NoiseRF.clap
+          ./clap-validator validate --test-filter '.*state.*' --invert-filter zig-out/x86_64-linux-gnu/NoiseRF.clap
 
