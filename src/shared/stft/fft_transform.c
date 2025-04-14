@@ -80,7 +80,7 @@ FftTransform *fft_transform_initialize_bins(const uint32_t fft_size) {
 static void allocate_pffft(FftTransform *self) {
   self->setup = pffft_new_setup(self->fft_size, PFFFT_REAL);
 
-  assert(self->setup != NULL);
+  assert(self->setup != NULL); // probably given an invalid fft size
 
   const size_t fft_size_bytes = self->fft_size * sizeof(float);
 

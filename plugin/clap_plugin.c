@@ -45,10 +45,12 @@ enum ParamIds {
   pid_LEARN_NOISE = 57433,
   pid_RESIDUAL_LISTEN = 56201,
   pid_RESET_PROFILE = 453689734,
-  pid_ENABLE = 239487
+  pid_ENABLE = 239487,
+  pid_NOISE_SCALING_TYPE = 6710386,
+  pid_POST_FILTER_THRESHOLD = 18613465,
 };
 
-#define PARAMS_COUNT 9
+#define PARAMS_COUNT 11
 #define NOISE_PROFILE_MAX_SIZE 8192
 
 typedef struct {
@@ -111,10 +113,12 @@ typedef struct {
   _Atomic float smoothing;
   _Atomic float whitening;
   _Atomic bool transient_protection;
-  _Atomic bool learn_noise;
+  _Atomic uint32_t learn_noise;
   _Atomic bool residual_listen;
   _Atomic bool reset_profile;
   _Atomic bool enable;
+  _Atomic uint32_t noise_scaling_type;
+  _Atomic float post_filter_threshold;
 
   // We use atomic triple buffers for the noise profile state to allow for
   // thread-safe communication between the main thread (which does loading and
@@ -131,6 +135,8 @@ typedef struct {
 
 static void noise_repellent_process_event(clap_noise_repellent *plug,
                                           const clap_event_header_t *hdr);
+
+static void set_all_params_to_default(clap_noise_repellent *plug);
 
 /////////////////////////////
 // clap_plugin_audio_ports //
@@ -202,7 +208,7 @@ static void set_value(clap_noise_repellent *plug, uint32_t param_id,
     plug->transient_protection = value >= 0.5;
     break;
   case pid_LEARN_NOISE:
-    plug->learn_noise = value >= 0.5;
+    plug->learn_noise = value;
     break;
   case pid_RESIDUAL_LISTEN:
     plug->residual_listen = value >= 0.5;
@@ -212,6 +218,12 @@ static void set_value(clap_noise_repellent *plug, uint32_t param_id,
     break;
   case pid_ENABLE:
     plug->enable = value >= 0.5;
+    break;
+  case pid_NOISE_SCALING_TYPE:
+    plug->noise_scaling_type = value;
+    break;
+  case pid_POST_FILTER_THRESHOLD:
+    plug->post_filter_threshold = value;
     break;
   }
 }
@@ -225,7 +237,7 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
                                     clap_param_info_t *param_info) {
   *param_info = (clap_param_info_t){};
   switch (param_index) {
-  case 0: // amount
+  case 0:
     param_info->id = pid_AMOUNT;
     strncpy(param_info->name, "Reduction Amount", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
@@ -235,7 +247,7 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
     param_info->cookie = NULL;
     break;
-  case 1: // offset
+  case 1:
     param_info->id = pid_OFFSET;
     strncpy(param_info->name, "Reduction Strength", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
@@ -245,7 +257,7 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
     param_info->cookie = NULL;
     break;
-  case 2: // smoothing
+  case 2:
     param_info->id = pid_SMOOTHING;
     strncpy(param_info->name, "Smoothing", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
@@ -255,7 +267,7 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
     param_info->cookie = NULL;
     break;
-  case 3: // whitening
+  case 3:
     param_info->id = pid_WHITENING;
     strncpy(param_info->name, "Residual Whitening", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
@@ -265,7 +277,7 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
     param_info->cookie = NULL;
     break;
-  case 4: // transient protection
+  case 4:
     param_info->id = pid_TRANSIENT_PROTECTION;
     strncpy(param_info->name, "Protect Transients", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
@@ -275,17 +287,17 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
     param_info->cookie = NULL;
     break;
-  case 5: // learn noise
+  case 5:
     param_info->id = pid_LEARN_NOISE;
     strncpy(param_info->name, "Learn Noise Profile", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
     param_info->default_value = 0.0;
     param_info->min_value = 0.0;
-    param_info->max_value = 1.0;
+    param_info->max_value = 3.0;
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
     param_info->cookie = NULL;
     break;
-  case 6: // residual listen
+  case 6:
     param_info->id = pid_RESIDUAL_LISTEN;
     strncpy(param_info->name, "Residual Listen", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
@@ -295,7 +307,7 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
     param_info->cookie = NULL;
     break;
-  case 7: // reset profile
+  case 7:
     param_info->id = pid_RESET_PROFILE;
     strncpy(param_info->name, "Reset Noise Profile", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
@@ -305,7 +317,7 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
     param_info->cookie = NULL;
     break;
-  case 8: // enable
+  case 8:
     param_info->id = pid_ENABLE;
     strncpy(param_info->name, "Enable", CLAP_NAME_SIZE);
     param_info->module[0] = 0;
@@ -313,6 +325,26 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
     param_info->min_value = 0.0;
     param_info->max_value = 1.0;
     param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
+    param_info->cookie = NULL;
+    break;
+  case 9:
+    param_info->id = pid_NOISE_SCALING_TYPE;
+    strncpy(param_info->name, "Noise Scaling Type", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 0.0;
+    param_info->min_value = 0.0;
+    param_info->max_value = 2.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED;
+    param_info->cookie = NULL;
+    break;
+  case 10:
+    param_info->id = pid_POST_FILTER_THRESHOLD;
+    strncpy(param_info->name, "Post Filter Threshold", CLAP_NAME_SIZE);
+    param_info->module[0] = 0;
+    param_info->default_value = 0.0;
+    param_info->min_value = -10.0;
+    param_info->max_value = 10.0;
+    param_info->flags = CLAP_PARAM_IS_AUTOMATABLE;
     param_info->cookie = NULL;
     break;
   default:
@@ -342,7 +374,7 @@ bool noise_repellent_param_get_value(const clap_plugin_t *plugin,
     *value = plug->transient_protection ? 1.0 : 0.0;
     return true;
   case pid_LEARN_NOISE:
-    *value = plug->learn_noise ? 1.0 : 0.0;
+    *value = round(plug->learn_noise);
     return true;
   case pid_RESIDUAL_LISTEN:
     *value = plug->residual_listen ? 1.0 : 0.0;
@@ -352,6 +384,12 @@ bool noise_repellent_param_get_value(const clap_plugin_t *plugin,
     return true;
   case pid_ENABLE:
     *value = plug->enable ? 1.0 : 0.0;
+    return true;
+  case pid_NOISE_SCALING_TYPE:
+    *value = round(plug->noise_scaling_type);
+    return true;
+  case pid_POST_FILTER_THRESHOLD:
+    *value = plug->post_filter_threshold;
     return true;
   }
 
@@ -371,19 +409,53 @@ bool noise_repellent_param_value_to_text(const clap_plugin_t *plugin,
     snprintf(display, size, "%.1f %%", value);
     return true;
   case pid_TRANSIENT_PROTECTION:
-    snprintf(display, size, value >= 0.5 ? "On" : "Off");
+    strncpy(display, value >= 0.5 ? "On" : "Off", size);
     return true;
-  case pid_LEARN_NOISE:
-    snprintf(display, size, value >= 0.5 ? "Learning" : "Not Learning");
+  case pid_LEARN_NOISE: {
+    const char *text = "";
+    switch ((int)round(value)) {
+    case 0:
+      text = "Not Learning";
+      break;
+    case 1:
+      text = "Learning: Average";
+      break;
+    case 2:
+      text = "Learning: Median";
+      break;
+    case 3:
+      text = "Learning: Maximum";
+    }
+    snprintf(display, size, text);
     return true;
+  }
   case pid_RESIDUAL_LISTEN:
-    snprintf(display, size, value >= 0.5 ? "Residual" : "Output");
+    strncpy(display, value >= 0.5 ? "Residual" : "Output", size);
     return true;
   case pid_RESET_PROFILE:
-    snprintf(display, size, value >= 0.5 ? "Reset" : "Normal");
+    strncpy(display, value >= 0.5 ? "Reset" : "Normal", size);
     return true;
   case pid_ENABLE:
-    snprintf(display, size, value >= 0.5 ? "Enabled" : "Bypassed");
+    strncpy(display, value >= 0.5 ? "Enabled" : "Bypassed", size);
+    return true;
+  case pid_NOISE_SCALING_TYPE: {
+    const char *text = "";
+    switch ((int)round(value)) {
+    case 0:
+      text = "A-posteriori SNR";
+      break;
+    case 1:
+      text = "Critical Bands";
+      break;
+    case 2:
+      text = "Masking Thresholds";
+      break;
+    }
+    strncpy(display, text, size);
+    return true;
+  }
+  case pid_POST_FILTER_THRESHOLD:
+    snprintf(display, size, "%.1f dB", value);
     return true;
   }
   return false;
@@ -482,6 +554,10 @@ static bool noise_repellent_code_state(const clap_plugin_t *plugin,
   uint32_t params_count = PARAMS_COUNT;
   if (!code(coder, &params_count, sizeof(params_count))) {
     return false;
+  }
+
+  if (coder->mode == coding_DECODE && params_count > PARAMS_COUNT) {
+    set_all_params_to_default(plug);
   }
 
   for (uint32_t i = 0; i < params_count; ++i) {
@@ -585,6 +661,14 @@ static const clap_plugin_state_t s_noise_repellent_state = {
 // clap_plugin //
 /////////////////
 
+static void set_all_params_to_default(clap_noise_repellent *plug) {
+  for (uint32_t i = 0; i < PARAMS_COUNT; ++i) {
+    clap_param_info_t param_info;
+    noise_repellent_param_get_info(&plug->plugin, i, &param_info);
+    set_value(plug, param_info.id, param_info.default_value);
+  }
+}
+
 static bool noise_repellent_init(const struct clap_plugin *plugin) {
   clap_noise_repellent *plug = plugin->plugin_data;
 
@@ -595,11 +679,7 @@ static bool noise_repellent_init(const struct clap_plugin *plugin) {
   plug->hostLatency = plug->host->get_extension(plug->host, CLAP_EXT_LATENCY);
   plug->hostParams = plug->host->get_extension(plug->host, CLAP_EXT_PARAMS);
 
-  for (uint32_t i = 0; i < PARAMS_COUNT; ++i) {
-    clap_param_info_t param_info;
-    noise_repellent_param_get_info(plugin, i, &param_info);
-    set_value(plug, param_info.id, param_info.default_value);
-  }
+  set_all_params_to_default(plug);
 
   return true;
 }
@@ -692,15 +772,15 @@ noise_repellent_process(const struct clap_plugin *plugin,
 
   // Update the parameters struct for the spectral bleach instances
   SpectralBleachParameters parameters = {
-      .learn_noise = plug->learn_noise,
+      .learn_noise = (int)plug->learn_noise,
       .residual_listen = plug->residual_listen,
       .reduction_amount = plug->amount,
       .smoothing_factor = plug->smoothing,
       .transient_protection = plug->transient_protection,
       .whitening_factor = plug->whitening,
-      .noise_scaling_type = 1,
+      .noise_scaling_type = (int)plug->noise_scaling_type,
       .noise_rescale = plug->offset,
-      .post_filter_threshold = 0.0f,
+      .post_filter_threshold = plug->post_filter_threshold,
   };
 
   // Load parameters into both instances

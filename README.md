@@ -7,11 +7,12 @@ It's licensed under LGPLv3.
 
 As of writing this (April 2024), the original version is not maintained, and has tricky dependencies for compiling on all 3 OS. This version differs from the original library and plugin in the following ways:
 - It is a CLAP plugin instead of LV2 (still supports Linux, macOS, and Windows)
+- Exposes a few more parameters in the plugin
 - It uses pffft instead of fftw3
 - It uses Zig for the build system allowing for simple compilation across all platforms
 - There is no adaptive mode
 - There is no mono mode. Only stereo.
-- It fixes state saving
+- It fixes state saving ([issue](https://github.com/lucianodato/noise-repellent/issues/114))
 - The library code (libspecbleach) and plugin code (noise-repellent) are in a single repository - this was just done for convenience
 
 ## Building
