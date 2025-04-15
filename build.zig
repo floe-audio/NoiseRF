@@ -181,17 +181,21 @@ const ClapValidatorStep = struct {
             try clap_validator_file.chmod(0o755);
         }
 
-        const args = [_][]const u8{
+        // IMPROVE: support clap-validator state tests. For now, we skip the state test for 2 reasons:
+        // - clap-validator has bugs (https://github.com/free-audio/clap-validator/issues/18)
+        // - The tests impose requirements more than is strictly necessary for the plugin to work. The tests
+        //   require state to be byte-for-byte identical which is a stronger requirement that the CLAP spec which
+        //   just requires the same result when parsing.
+
+        var out_code: u8 = 0;
+        const out = try b.runAllowFail(&.{
             clap_validator,
             "validate",
             "--test-filter",
             ".*state.*",
             "--invert-filter",
             clap_path,
-        };
-
-        var out_code: u8 = 0;
-        const out = try b.runAllowFail(&args, &out_code, .Inherit);
+        }, &out_code, .Inherit);
 
         if (out_code != 0) {
             return step.fail("clap-validator failed with code {d}\n{s}", .{ out_code, out });
