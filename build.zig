@@ -177,7 +177,7 @@ const ClapValidatorStep = struct {
         const clap_path = self.plugin_step.clap_path.?;
         const clap_validator = self.clap_validator.getPath2(b, step);
 
-        {
+        if (builtin.os.tag != .windows) {
             const clap_validator_file = try std.fs.openFileAbsolute(clap_validator, .{});
             defer clap_validator_file.close();
             try clap_validator_file.chmod(0o755);
