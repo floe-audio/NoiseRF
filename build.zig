@@ -118,9 +118,7 @@ fn addClapValidatorIfNeeded(b: *std.Build, test_step: *std.Build.Step, install_s
                     clap_validator = b.dependency("clap_validator_ubuntu", .{}).path("clap-validator");
                 }
             },
-            else => {
-                // Unsupported OS for clap-validator
-            },
+            else => {},
         }
     }
 
@@ -271,7 +269,7 @@ const PluginInstallStep = struct {
             },
             .windows, .linux => {
                 // For Windows and Linux, we just copy the file but use the clap extension rather than
-                // whatever the default would be (dll/lib*.so)
+                // whatever the default would be (dll/lib*.so).
                 _ = try std.fs.updateFileAbsolute(source, clap_path, .{});
             },
             else => unreachable,
