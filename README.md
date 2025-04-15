@@ -19,18 +19,13 @@ As of writing this (April 2024), the original version is not maintained, and has
 Zig 0.13.0 is required. Cross-compiling is easy: `zig build -Dtarget=x86_64-linux`, `zig build -Dtarget=x86_64-windows`, `zig build -Dtarget=aarch64-macos`. Binaries are placed in `zig-out` folder. See `zig build --help` for more options.
 
 ## Installation
-Place the plugin in the appropriate directory for your OS:
-Linux:
-  - ~/.clap
-  - /usr/lib/clap
+Place the plugin in the appropriate directory for your OS.
 
-Windows:
-  - %COMMONPROGRAMFILES%\CLAP
-  - %LOCALAPPDATA%\Programs\Common\CLAP
+Linux: `~/.clap` or `/usr/lib/clap`.
 
-MacOS;
-  - /Library/Audio/Plug-Ins/CLAP
-  - ~/Library/Audio/Plug-Ins/CLAP
+Windows: `C:\Program Files\Common Files\CLAP` or `%LOCALAPPDATA%\Programs\Common\CLAP`
+
+MacOS: `/Library/Audio/Plug-Ins/CLAP` or `~/Library/Audio/Plug-Ins/CLAP`
 
 ## Dependencies
 We've removed the fftw3 dependency, so only glibc is needed on Linux.
