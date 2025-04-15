@@ -21,12 +21,9 @@ jobs:
       - run: zig build -Dtarget=aarch64-macos.11.0.0
       - run: zig build -Dtarget=x86_64-windows.win7
       - run: zig build -Dtarget=aarch64-windows
-      - run: find zig-out
 
-      - run: |
-          curl -L https://github.com/free-audio/clap-validator/releases/download/0.3.2/clap-validator-0.3.2-ubuntu-18.04.tar.gz | tar -xz
-          chmod +x clap-validator
-          ./clap-validator validate --test-filter '.*state.*' --invert-filter zig-out/x86_64-linux-gnu/NoiseRF.clap
+      - run: zig build test
+
   build-windows:
     runs-on: windows-latest
     steps:
@@ -34,9 +31,14 @@ jobs:
       - uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
-      - run: zig build "-Dtarget=x86_64-windows.win7"
-      - run: |
-          powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://github.com/free-audio/clap-validator/releases/download/0.3.2/clap-validator-0.3.2-windows.zip -OutFile clap-validator.zip"
-          powershell -Command "Expand-Archive clap-validator.zip -DestinationPath ."
-          clap-validator.exe validate --test-filter '.*state.*' --invert-filter zig-out/x86_64-windows-gnu/NoiseRF.clap
+      - run: zig build "-Dtarget=x86_64-windows.win7" test
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+      - run: zig build "-Dtarget=aarch64-macos.11.0.0" test
 

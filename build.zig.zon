@@ -12,6 +12,20 @@
             .url = "https://github.com/free-audio/clap/archive/refs/tags/1.2.3.tar.gz",
             .hash = "1220c6534f5ec8d81d53df7f4e2c6e4274ba13b74bab56d296f34085e23fd7d243ba",
         },
+        .clap_validator_ubuntu = .{
+            // We use a custom hosted version of clap-validator for Ubuntu because there's a bug in Zig when
+            // trying to use the official tar.gz version.
+            .url = "https://github.com/SamWindell/clap-val-zip/raw/refs/heads/main/clap-validator.zip",
+            .hash = "1220fbc2c3101f34fdb3f86244b5135c9a78981c32c7f3bb819c59e0082366930e96",
+        },
+        .clap_validator_macos = .{
+            .url = "https://github.com/free-audio/clap-validator/releases/download/0.3.2/clap-validator-0.3.2-macos-universal.tar.gz",
+            .hash = "12206568a9d5c207b7776db52c903db3fbd08b1cbd73a381bc6850580532af682394",
+        },
+        .clap_validator_windows = .{
+            .url = "https://github.com/free-audio/clap-validator/releases/download/0.3.2/clap-validator-0.3.2-windows.zip",
+            .hash = "12200aa640d32845ab849854c81b352f1c9c2d637c885a5ee69eab9839e5ba89b4cf",
+        },
     },
 
     .paths = .{
