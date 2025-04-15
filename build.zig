@@ -204,8 +204,11 @@ const ClapValidatorStep = struct {
 };
 
 fn installPath(b: *std.Build, step: *std.Build.Step.Compile) []const u8 {
-    // It's called linuxTriple but it can be used for any OS.
-    const folder = step.rootModuleTarget().linuxTriple(b.allocator) catch @panic("OOM");
+    const target = step.rootModuleTarget();
+    const folder = b.fmt("{s}-{s}", .{
+        @tagName(target.cpu.arch),
+        @tagName(target.os.tag),
+    });
     return b.getInstallPath(.prefix, folder);
 }
 
