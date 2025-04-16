@@ -1,2 +1,2 @@
 default:
-    zig build -Doptimize=ReleaseFast
+    zig build -Doptimize=ReleaseSafe

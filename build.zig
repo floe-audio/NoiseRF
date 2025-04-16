@@ -11,23 +11,22 @@ const project_vendor = "Floe Audio";
 const project_url = "TODO";
 const project_description = "Stereo broadband noise reduction - fork of Luciano Dato's Noise Repellent";
 
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+const CompileConfig = struct {
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    flags: []const []const u8,
+    clap_inlude_path: std.Build.LazyPath,
+};
 
-    const optimize = b.standardOptimizeOption(.{});
-
+fn addNoiseReductionLibrary(b: *std.Build, compile_config: *const CompileConfig) *std.Build.Step.Compile {
     const lib = b.addStaticLibrary(.{
         .name = "libspecbleach",
-        .target = target,
-        .optimize = optimize,
+        .target = compile_config.target,
+        .optimize = compile_config.optimize,
         .pic = true,
     });
 
     const pffft = b.dependency("pffft", .{});
-
-    const flags = &[_][]const u8{
-        "-fvisibility=hidden",
-    };
 
     lib.addCSourceFiles(.{
         .files = &[_][]const u8{
@@ -55,17 +54,45 @@ pub fn build(b: *std.Build) void {
             "src/shared/utils/spectral_trailing_buffer.c",
             "src/shared/utils/spectral_utils.c",
         },
-        .flags = flags,
+        .flags = compile_config.flags,
     });
     lib.addCSourceFile(.{
         .file = pffft.path("pffft.c"),
-        .flags = flags,
+        .flags = compile_config.flags,
     });
     lib.addIncludePath(pffft.path(""));
     lib.linkLibC();
+    lib.addIncludePath(b.path("include"));
 
-    const clap = b.dependency("clap", .{});
+    return lib;
+}
 
+fn addUnitTests(b: *std.Build, compile_config: *const CompileConfig, test_step: *std.Build.Step, plugin_static: *std.Build.Step.Compile) void {
+    const tests = b.addExecutable(.{
+        .name = "unit-tests",
+        .target = compile_config.target,
+        .optimize = compile_config.optimize,
+    });
+    tests.addCSourceFiles(.{
+        .files = &[_][]const u8{
+            "plugin/tests.c",
+        },
+        .flags = compile_config.flags,
+    });
+    tests.linkLibC();
+    tests.linkLibrary(plugin_static);
+    tests.addIncludePath(b.path("include"));
+    tests.addIncludePath(compile_config.clap_inlude_path);
+    const run_tests = b.addRunArtifact(tests);
+    test_step.dependOn(&run_tests.step);
+
+    const install_artifact = b.addInstallArtifact(tests, .{});
+    b.default_step.dependOn(&install_artifact.step);
+}
+
+// The bulk of the plugin is compiled into a static library so it can be built into other steps as needed, such as
+// the CLAP shared library and the tests executable.
+fn addPluginStatic(b: *std.Build, compile_config: *const CompileConfig) *std.Build.Step.Compile {
     const config = b.addConfigHeader(.{
         .style = .blank,
     }, .{
@@ -77,15 +104,15 @@ pub fn build(b: *std.Build) void {
         .PROJECT_DESCRIPTION = project_description,
     });
 
-    const plugin = b.addSharedLibrary(.{
-        .name = "NoiseRF",
-        .target = target,
-        .optimize = optimize,
+    const plugin = b.addStaticLibrary(.{
+        .name = "plugin",
+        .target = compile_config.target,
+        .optimize = compile_config.optimize,
         .pic = true,
     });
-    plugin.linkLibrary(lib);
+    plugin.linkLibrary(addNoiseReductionLibrary(b, compile_config));
     plugin.linkLibC();
-    plugin.addIncludePath(clap.path("include"));
+    plugin.addIncludePath(compile_config.clap_inlude_path);
     plugin.addIncludePath(b.path("include"));
     plugin.addConfigHeader(config);
     plugin.addCSourceFiles(.{
@@ -93,16 +120,54 @@ pub fn build(b: *std.Build) void {
             "plugin/clap_plugin.c",
             "plugin/signal_crossfade.c",
         },
-        .flags = flags,
+        .flags = compile_config.flags,
     });
 
-    const test_step = b.step("test", "");
-
-    const install = PluginInstallStep.add(b, plugin) catch unreachable;
-    addClapValidatorIfNeeded(b, test_step, install) catch unreachable;
+    return plugin;
 }
 
-fn addClapValidatorIfNeeded(b: *std.Build, test_step: *std.Build.Step, install_step: *PluginInstallStep) !void {
+fn addClapPlugin(b: *std.Build, compile_config: *const CompileConfig, plugin_static: *std.Build.Step.Compile) *std.Build.Step.Compile {
+    const clap_plugin = b.addSharedLibrary(.{
+        .name = "NoiseRF",
+        .target = compile_config.target,
+        .optimize = compile_config.optimize,
+        .pic = true,
+    });
+    clap_plugin.addCSourceFiles(.{
+        .files = &[_][]const u8{
+            "plugin/clap_entry.c",
+        },
+        .flags = compile_config.flags,
+    });
+    clap_plugin.linkLibC();
+    clap_plugin.linkLibrary(plugin_static);
+    clap_plugin.addIncludePath(compile_config.clap_inlude_path);
+
+    return clap_plugin;
+}
+
+pub fn build(b: *std.Build) void {
+    const compile_config = CompileConfig{
+        .target = b.standardTargetOptions(.{}),
+        .optimize = b.standardOptimizeOption(.{}),
+        .flags = &[_][]const u8{
+            "-fvisibility=hidden",
+        },
+        .clap_inlude_path = b.dependency("clap", .{}).path("include"),
+    };
+
+    const plugin_static = addPluginStatic(b, &compile_config);
+
+    const clap_plugin = addClapPlugin(b, &compile_config, plugin_static);
+
+    const install_step = PluginInstallStep.add(b, clap_plugin);
+
+    const test_step = b.step("test", "build and run tests");
+    addUnitTests(b, &compile_config, test_step, plugin_static);
+    addClapValidatorIfNeeded(b, test_step, install_step);
+}
+
+fn addClapValidatorIfNeeded(b: *std.Build, test_step: *std.Build.Step, install_step: *PluginInstallStep) void {
     var clap_validator: ?std.Build.LazyPath = null;
 
     if (builtin.os.tag == install_step.lib_step.rootModuleTarget().os.tag) {
@@ -123,7 +188,7 @@ fn addClapValidatorIfNeeded(b: *std.Build, test_step: *std.Build.Step, install_s
     }
 
     if (clap_validator) |c| {
-        ClapValidatorStep.add(b, test_step, install_step, c) catch unreachable;
+        ClapValidatorStep.add(b, test_step, install_step, c);
     }
 }
 
@@ -153,8 +218,8 @@ const ClapValidatorStep = struct {
         test_step: *std.Build.Step,
         plugin_step: *PluginInstallStep,
         clap_validator: std.Build.LazyPath,
-    ) !void {
-        const validate = b.allocator.create(ClapValidatorStep) catch unreachable;
+    ) void {
+        const validate = b.allocator.create(ClapValidatorStep) catch @panic("out of memory");
         validate.step = std.Build.Step.init(.{
             .id = std.Build.Step.Id.custom,
             .name = "clap-validator",
@@ -221,8 +286,8 @@ const PluginInstallStep = struct {
     pub fn add(
         b: *std.Build,
         plugin: *std.Build.Step.Compile,
-    ) !*PluginInstallStep {
-        const install = b.allocator.create(PluginInstallStep) catch unreachable;
+    ) *PluginInstallStep {
+        const install = b.allocator.create(PluginInstallStep) catch @panic("out of memory");
         install.step = std.Build.Step.init(.{
             .id = std.Build.Step.Id.custom,
             .name = "plugin-install",

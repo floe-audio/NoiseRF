@@ -944,29 +944,8 @@ plugin_factory_create_plugin(const struct clap_plugin_factory *factory,
   return NULL;
 }
 
-static const clap_plugin_factory_t s_plugin_factory = {
+const clap_plugin_factory_t s_plugin_factory = {
     .get_plugin_count = plugin_factory_get_plugin_count,
     .get_plugin_descriptor = plugin_factory_get_plugin_descriptor,
     .create_plugin = plugin_factory_create_plugin,
-};
-
-////////////////
-// clap_entry //
-////////////////
-
-static bool entry_init(const char *plugin_path) { return true; }
-
-static void entry_deinit(void) {}
-
-static const void *entry_get_factory(const char *factory_id) {
-  if (!strcmp(factory_id, CLAP_PLUGIN_FACTORY_ID))
-    return &s_plugin_factory;
-  return NULL;
-}
-
-CLAP_EXPORT const clap_plugin_entry_t clap_entry = {
-    .clap_version = CLAP_VERSION_INIT,
-    .init = entry_init,
-    .deinit = entry_deinit,
-    .get_factory = entry_get_factory,
 };
