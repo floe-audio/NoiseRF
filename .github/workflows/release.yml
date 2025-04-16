@@ -6,7 +6,7 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     permissions:
       contents: write
     steps:
@@ -20,15 +20,39 @@ jobs:
       - run: zig build -Dtarget=aarch64-macos.11.0.0 -Doptimize=ReleaseFast
       - run: zig build -Dtarget=x86_64-windows.win7 -Doptimize=ReleaseFast
       - run: zig build -Dtarget=aarch64-windows -Doptimize=ReleaseFast
+
+      - name: Install Code Signing Certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with: 
+          p12-file-base64: ${{ secrets.APPLE_CODESIGN_CERT_P12_BASE64  }}
+          p12-password: ${{ secrets.APPLE_CODESIGN_CERT_PASSWORD  }}
+
+      - run: |
+          codesign --sign "$IDENTITY" --timestamp --options=runtime --deep --force x86_64-macos/NoiseRF.clap
+          codesign --sign "$IDENTITY" --timestamp --options=runtime --deep --force aarch64-macos/NoiseRF.clap
+        env:
+          IDENTITY: ${{ secrets.APPLE_CODESIGN_CERT_IDENTITY }}
+        working-directory: zig-out
+
       - run: |
           mkdir -p release
           find zig-out
           (cd zig-out/x86_64-linux && zip -r ../../release/NoiseRF-Linux-x86_64.zip *)
-          (cd zig-out/aarch64-linux && zip -r ../../release/NoiseRF-Linux-aarch64.zip *)
+          (cd zig-out/aarch64-linux && zip -r ../../release/NoiseRF-Linux-arm64.zip *)
           (cd zig-out/x86_64-macos && zip -r ../../release/NoiseRF-Mac-x86_64.zip *)
-          (cd zig-out/aarch64-macos && zip -r ../../release/NoiseRF-Mac-aarch64.zip *)
+          (cd zig-out/aarch64-macos && zip -r ../../release/NoiseRF-Mac-arm64.zip *)
           (cd zig-out/x86_64-windows && zip -r ../../release/NoiseRF-Win-x86_64.zip *)
-          (cd zig-out/aarch64-windows && zip -r ../../release/NoiseRF-Win-aarch64.zip *)
+          (cd zig-out/aarch64-windows && zip -r ../../release/NoiseRF-Win-arm64.zip *)
+
+      - run: |
+          xcrun notarytool submit NoiseRF-Mac-x86_64.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun notarytool submit NoiseRF-Mac-arm64.zip --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+
+        env:
+          APPLE_ID: ${{ secrets.APPLE_NOTARIZE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        working-directory: release
 
       - uses: ncipollo/release-action@v1
         with:
