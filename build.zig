@@ -86,8 +86,12 @@ fn addUnitTests(b: *std.Build, compile_config: *const CompileConfig, test_step: 
     const run_tests = b.addRunArtifact(tests);
     test_step.dependOn(&run_tests.step);
 
-    const install_artifact = b.addInstallArtifact(tests, .{});
-    b.default_step.dependOn(&install_artifact.step);
+    if (builtin.os.tag == plugin_static.rootModuleTarget().os.tag and
+        builtin.cpu.arch == plugin_static.rootModuleTarget().cpu.arch)
+    {
+        const install_artifact = b.addInstallArtifact(tests, .{});
+        b.default_step.dependOn(&install_artifact.step);
+    }
 }
 
 // The bulk of the plugin is compiled into a static library so it can be built into other steps as needed, such as

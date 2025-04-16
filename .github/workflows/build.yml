@@ -25,7 +25,16 @@ jobs:
       - run: zig build -Dtarget=aarch64-windows
 
       # Run the tests.
-      - run: zig build test
+      - run: zig build -Dtarget=x86_64-linux test
+
+      # Run valgrind.
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+      - name: Run valgrind
+        working-directory: zig-out/bin
+        run: valgrind --leak-check=full --error-exitcode=1 --exit-on-first-error=no ./unit-tests
 
   build-windows:
     runs-on: windows-latest
