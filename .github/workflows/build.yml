@@ -25,7 +25,7 @@ jobs:
       - run: zig build -Dtarget=aarch64-windows
 
       # Run the tests.
-      - run: zig build -Dtarget=x86_64-linux test
+      - run: zig build -Dtarget=x86_64-linux-gnu test
 
       # Run valgrind.
       - name: Install valgrind
