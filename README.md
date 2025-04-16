@@ -1,8 +1,10 @@
 # NoiseRF
-## Noise Repellent Fork - CLAP plugin
 
 ![screenshot](resources/2025-04-16-112608_screenshot.png)
+
 _GUI in Reaper (it will vary between hosts)_
+
+## Noise Repellent Fork - CLAP plugin
 
 This is a fork of Luciano Dato's noise reduction library [libspecbleach](https://github.com/lucianodato/libspecbleach) and LV2 plugin, [noise-repellent](https://github.com/lucianodato/noise-repellent).
 
