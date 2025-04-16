@@ -19,6 +19,7 @@
 #include <math.h>
 
 #include "config.h"
+#include "debug.h"
 #include "signal_crossfade.h"
 #include "specbleach_denoiser.h"
 
@@ -67,7 +68,7 @@ enum ParamIds {
 };
 
 #define PARAMS_COUNT 11
-#define NOISE_PROFILE_MAX_SIZE 8192
+#define NOISE_PROFILE_MAX_SIZE 9000
 
 typedef struct {
   float channels[2][NOISE_PROFILE_MAX_SIZE];
@@ -712,6 +713,9 @@ static bool noise_repellent_activate(const struct clap_plugin *plugin,
                                      uint32_t max_frames_count) {
   clap_noise_repellent *plug = plugin->plugin_data;
 
+  if (sample_rate > 192000.0)
+    return false; // IMPROVE: support higher sample rates
+
   plug->soft_bypass = signal_crossfade_initialize((uint32_t)sample_rate);
   if (!plug->soft_bypass) {
     return false;
@@ -727,8 +731,10 @@ static bool noise_repellent_activate(const struct clap_plugin *plugin,
     }
   }
 
-  assert(specbleach_get_noise_profile_size(plug->lib_instance[0]) <=
-         NOISE_PROFILE_MAX_SIZE);
+  const uint32_t noise_profile_size =
+      specbleach_get_noise_profile_size(plug->lib_instance[0]);
+  DEBUG_PRINT("Noise profile size: %u\n", noise_profile_size);
+  assert(noise_profile_size <= NOISE_PROFILE_MAX_SIZE);
 
   return true;
 }
