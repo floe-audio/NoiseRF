@@ -5,7 +5,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const project_name = "NoiseRF";
-const project_version = "0.1.0";
 const project_id = "org.floe-audio.noiserf";
 const project_vendor = "Floe Audio";
 const project_url = "TODO";
@@ -16,6 +15,7 @@ const CompileConfig = struct {
     optimize: std.builtin.OptimizeMode,
     flags: []const []const u8,
     clap_inlude_path: std.Build.LazyPath,
+    project_version: []const u8,
 };
 
 fn addNoiseReductionLibrary(b: *std.Build, compile_config: *const CompileConfig) *std.Build.Step.Compile {
@@ -94,6 +94,19 @@ fn addUnitTests(b: *std.Build, compile_config: *const CompileConfig, test_step: 
     }
 }
 
+fn getLatestVersion(b: *std.Build) []const u8 {
+    var version_str: []const u8 = b.run(&.{ "git", "describe", "--tags", "--abbrev=0" });
+    version_str = std.mem.trimRight(u8, version_str, " \n\r\t");
+    version_str = std.mem.trimLeft(u8, version_str, "v");
+
+    const version = std.SemanticVersion.parse(version_str) catch {
+        std.debug.print("Latest tag from git is not a semver: {s}\n", .{version_str});
+        std.process.exit(1);
+    };
+
+    return b.fmt("{d}.{d}.{d}", .{ version.major, version.minor, version.patch });
+}
+
 // The bulk of the plugin is compiled into a static library so it can be built into other steps as needed, such as
 // the CLAP shared library and the tests executable.
 fn addPluginStatic(b: *std.Build, compile_config: *const CompileConfig) *std.Build.Step.Compile {
@@ -101,7 +114,7 @@ fn addPluginStatic(b: *std.Build, compile_config: *const CompileConfig) *std.Bui
         .style = .blank,
     }, .{
         .PROJECT_NAME = project_name,
-        .PROJECT_VERSION = project_version,
+        .PROJECT_VERSION = compile_config.project_version,
         .PROJECT_ID = project_id,
         .PROJECT_VENDOR = project_vendor,
         .PROJECT_URL = project_url,
@@ -158,13 +171,14 @@ pub fn build(b: *std.Build) void {
             "-fvisibility=hidden",
         },
         .clap_inlude_path = b.dependency("clap", .{}).path("include"),
+        .project_version = getLatestVersion(b),
     };
 
     const plugin_static = addPluginStatic(b, &compile_config);
 
     const clap_plugin = addClapPlugin(b, &compile_config, plugin_static);
 
-    const install_step = PluginInstallStep.add(b, clap_plugin);
+    const install_step = PluginInstallStep.add(b, clap_plugin, &compile_config);
 
     const test_step = b.step("test", "build and run tests");
     addUnitTests(b, &compile_config, test_step, plugin_static);
@@ -286,10 +300,12 @@ const PluginInstallStep = struct {
     lib_step: *std.Build.Step.Compile,
     emitted_bin: ?std.Build.LazyPath,
     clap_path: ?[]const u8,
+    project_version: []const u8,
 
     pub fn add(
         b: *std.Build,
         plugin: *std.Build.Step.Compile,
+        compile_config: *const CompileConfig,
     ) *PluginInstallStep {
         const install = b.allocator.create(PluginInstallStep) catch @panic("out of memory");
         install.step = std.Build.Step.init(.{
@@ -301,6 +317,7 @@ const PluginInstallStep = struct {
         install.lib_step = plugin;
         install.emitted_bin = plugin.getEmittedBin();
         install.step.dependOn(&plugin.step);
+        install.project_version = compile_config.project_version;
         b.default_step.dependOn(&install.step);
         return install;
     }
@@ -365,10 +382,10 @@ const PluginInstallStep = struct {
                 .exec_name = self.lib_step.name,
                 .info_string = project_name,
                 .bundle_id = project_id,
-                .long_version = project_version,
+                .long_version = self.project_version,
                 .bundle_name = project_name,
-                .short_version = project_version,
-                .bundle_version = project_version,
+                .short_version = self.project_version,
+                .bundle_version = self.project_version,
                 .copyright = "Copyright (c) 2022 Luciano Dato and 2025 Floe Audio",
             },
         ) catch unreachable;
