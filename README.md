@@ -20,6 +20,8 @@ As of writing this (April 2024), the original version is not maintained, and has
 - It fixes input latency ([issue1](https://github.com/lucianodato/libspecbleach/issues/56), [issue2](https://github.com/lucianodato/noise-repellent/issues/116))
 - The library code (libspecbleach) and plugin code (noise-repellent) are in a single repository - this was just done for convenience
 
+I have found this algorithm can produce very high quality results - equivalent to Waves Z-Noise or iZotope RX for my use cases. It doesn't have the fancy GUI that those plugins have but still has a very usable interface and high quality processing.
+
 ## Building
 Zig 0.13.0 is required. Cross-compiling is easy: `zig build -Dtarget=x86_64-linux`, `zig build -Dtarget=x86_64-windows`, `zig build -Dtarget=aarch64-macos`. Binaries are placed in `zig-out` folder. See `zig build --help` for more options.
 
