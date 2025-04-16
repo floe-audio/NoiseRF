@@ -22,7 +22,7 @@
 #include "signal_crossfade.h"
 #include "specbleach_denoiser.h"
 
-static const clap_plugin_descriptor_t s_noise_repellent_desc = {
+static const clap_plugin_descriptor_t s_noise_repellent_desc_stereo = {
     .clap_version = CLAP_VERSION_INIT,
     .id = PROJECT_ID,
     .name = PROJECT_NAME,
@@ -33,7 +33,23 @@ static const clap_plugin_descriptor_t s_noise_repellent_desc = {
     .version = PROJECT_VERSION,
     .description = PROJECT_DESCRIPTION,
     .features = (const char *[]){CLAP_PLUGIN_FEATURE_AUDIO_EFFECT,
-                                 CLAP_PLUGIN_FEATURE_STEREO, NULL},
+                                 CLAP_PLUGIN_FEATURE_STEREO,
+                                 CLAP_PLUGIN_FEATURE_RESTORATION, NULL},
+};
+
+static const clap_plugin_descriptor_t s_noise_repellent_desc_mono = {
+    .clap_version = CLAP_VERSION_INIT,
+    .id = PROJECT_ID ".mono",
+    .name = PROJECT_NAME " Mono",
+    .vendor = PROJECT_VENDOR,
+    .url = PROJECT_URL,
+    .manual_url = "",
+    .support_url = "",
+    .version = PROJECT_VERSION,
+    .description = PROJECT_DESCRIPTION,
+    .features = (const char *[]){CLAP_PLUGIN_FEATURE_AUDIO_EFFECT,
+                                 CLAP_PLUGIN_FEATURE_MONO,
+                                 CLAP_PLUGIN_FEATURE_RESTORATION, NULL},
 };
 
 enum ParamIds {
@@ -54,8 +70,7 @@ enum ParamIds {
 #define NOISE_PROFILE_MAX_SIZE 8192
 
 typedef struct {
-  float left[NOISE_PROFILE_MAX_SIZE];
-  float right[NOISE_PROFILE_MAX_SIZE];
+  float channels[2][NOISE_PROFILE_MAX_SIZE];
   uint32_t blocks_averaged;
   uint32_t size;
 } noise_profile_state;
@@ -108,6 +123,8 @@ typedef struct {
   const clap_host_thread_check_t *hostThreadCheck;
   const clap_host_params_t *hostParams;
 
+  uint32_t channel_count;
+
   _Atomic float amount;
   _Atomic float offset;
   _Atomic float smoothing;
@@ -127,10 +144,8 @@ typedef struct {
   noise_profile_state_swap_buffers current_noise_profile;
 
   SignalCrossfade *soft_bypass;
-  SpectralBleachHandle lib_instance_1;
-  SpectralBleachHandle lib_instance_2;
-  float noise_profile_1[NOISE_PROFILE_MAX_SIZE]; // audio thread
-  float noise_profile_2[NOISE_PROFILE_MAX_SIZE]; // audio thread
+  SpectralBleachHandle lib_instance[2];
+  float noise_profile[2][NOISE_PROFILE_MAX_SIZE]; // audio thread
 } clap_noise_repellent;
 
 static void noise_repellent_process_event(clap_noise_repellent *plug,
@@ -150,16 +165,18 @@ static uint32_t noise_repellent_audio_ports_count(const clap_plugin_t *plugin,
 static bool noise_repellent_audio_ports_get(const clap_plugin_t *plugin,
                                             uint32_t index, bool is_input,
                                             clap_audio_port_info_t *info) {
+  clap_noise_repellent *plug = plugin->plugin_data;
   if (index > 0)
     return false;
   info->id = 0;
   if (is_input)
-    snprintf(info->name, sizeof(info->name), "%s", "Stereo In");
+    strncpy(info->name, "In", sizeof(info->name));
   else
-    snprintf(info->name, sizeof(info->name), "%s", "Stereo Out");
-  info->channel_count = 2;
+    strncpy(info->name, "Out", sizeof(info->name));
+  info->channel_count = plug->channel_count;
   info->flags = CLAP_AUDIO_PORT_IS_MAIN;
-  info->port_type = CLAP_PORT_STEREO;
+  info->port_type =
+      plug->channel_count == 1 ? CLAP_PORT_MONO : CLAP_PORT_STEREO;
   info->in_place_pair = CLAP_INVALID_ID;
   return true;
 }
@@ -175,10 +192,10 @@ static const clap_plugin_audio_ports_t s_noise_repellent_audio_ports = {
 
 uint32_t noise_repellent_latency_get(const clap_plugin_t *plugin) {
   clap_noise_repellent *plug = plugin->plugin_data;
-  if (!plug->lib_instance_1) {
+  if (!plug->lib_instance[0]) {
     return 0;
   }
-  return specbleach_get_latency(plug->lib_instance_1);
+  return specbleach_get_latency(plug->lib_instance[0]);
 }
 
 static const clap_plugin_latency_t s_noise_repellent_latency = {
@@ -426,7 +443,7 @@ bool noise_repellent_param_value_to_text(const clap_plugin_t *plugin,
     case 3:
       text = "Learning: Maximum";
     }
-    snprintf(display, size, text);
+    strncpy(display, text, size);
     return true;
   }
   case pid_RESIDUAL_LISTEN:
@@ -602,11 +619,10 @@ static bool noise_repellent_code_state(const clap_plugin_t *plugin,
   if (!code(coder, &state->size, sizeof(state->size))) {
     return false;
   }
-  if (!code(coder, state->left, sizeof(float) * state->size)) {
-    return false;
-  }
-  if (!code(coder, state->right, sizeof(float) * state->size)) {
-    return false;
+  for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+    if (!code(coder, state->channels[channel], sizeof(float) * state->size)) {
+      return false;
+    }
   }
 
   if (coder->mode == coding_DECODE) {
@@ -703,20 +719,15 @@ static bool noise_repellent_activate(const struct clap_plugin *plugin,
 
   const float frame_size_ms = 46;
 
-  plug->lib_instance_1 =
-      specbleach_initialize((uint32_t)sample_rate, frame_size_ms);
-  if (!plug->lib_instance_1) {
-    return false;
+  for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+    plug->lib_instance[channel] =
+        specbleach_initialize((uint32_t)sample_rate, frame_size_ms);
+    if (!plug->lib_instance[channel]) {
+      return false;
+    }
   }
 
-  plug->lib_instance_2 =
-      specbleach_initialize((uint32_t)sample_rate, frame_size_ms);
-  if (!plug->lib_instance_2) {
-    specbleach_free(plug->lib_instance_1);
-    return false;
-  }
-
-  assert(specbleach_get_noise_profile_size(plug->lib_instance_1) <=
+  assert(specbleach_get_noise_profile_size(plug->lib_instance[0]) <=
          NOISE_PROFILE_MAX_SIZE);
 
   return true;
@@ -725,12 +736,10 @@ static bool noise_repellent_activate(const struct clap_plugin *plugin,
 static void noise_repellent_deactivate(const struct clap_plugin *plugin) {
   clap_noise_repellent *plug = plugin->plugin_data;
 
-  if (plug->lib_instance_1) {
-    specbleach_free(plug->lib_instance_1);
-  }
-
-  if (plug->lib_instance_2) {
-    specbleach_free(plug->lib_instance_2);
+  for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+    if (plug->lib_instance[channel]) {
+      specbleach_free(plug->lib_instance[channel]);
+    }
   }
 
   if (plug->soft_bypass) {
@@ -783,26 +792,28 @@ noise_repellent_process(const struct clap_plugin *plugin,
       .post_filter_threshold = plug->post_filter_threshold,
   };
 
-  // Load parameters into both instances
-  specbleach_load_parameters(plug->lib_instance_1, parameters);
-  specbleach_load_parameters(plug->lib_instance_2, parameters);
+  for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+    specbleach_load_parameters(plug->lib_instance[channel], parameters);
+  }
 
   // Consume pending noise profile changes
   {
     noise_profile_state *state;
     if (noise_profile_state_consume(&plug->pending_noise_profile_change,
                                     &state)) {
-      specbleach_load_noise_profile(plug->lib_instance_1, state->left,
-                                    state->size, state->blocks_averaged);
-      specbleach_load_noise_profile(plug->lib_instance_2, state->right,
-                                    state->size, state->blocks_averaged);
+      for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+        specbleach_load_noise_profile(plug->lib_instance[channel],
+                                      state->channels[channel], state->size,
+                                      state->blocks_averaged);
+      }
     }
   }
 
   // Handle reset noise profile if needed
   if (plug->reset_profile) {
-    specbleach_reset_noise_profile(plug->lib_instance_1);
-    specbleach_reset_noise_profile(plug->lib_instance_2);
+    for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+      specbleach_reset_noise_profile(plug->lib_instance[channel]);
+    }
     plug->reset_profile = false; // Reset the trigger
   }
 
@@ -829,24 +840,15 @@ noise_repellent_process(const struct clap_plugin *plugin,
     /* process audio until the next event */
     const uint32_t block_size = next_ev_frame - i;
 
-    // Process left channel
-    specbleach_process(plug->lib_instance_1, block_size,
-                       &process->audio_inputs[0].data32[0][i],
-                       &process->audio_outputs[0].data32[0][i]);
-
-    // Process right channel
-    specbleach_process(plug->lib_instance_2, block_size,
-                       &process->audio_inputs[0].data32[1][i],
-                       &process->audio_outputs[0].data32[1][i]);
-
-    // Apply soft bypass if needed
-    signal_crossfade_run(plug->soft_bypass, block_size,
-                         &process->audio_inputs[0].data32[0][i],
-                         &process->audio_outputs[0].data32[0][i], plug->enable);
-
-    signal_crossfade_run(plug->soft_bypass, block_size,
-                         &process->audio_inputs[0].data32[1][i],
-                         &process->audio_outputs[0].data32[1][i], plug->enable);
+    for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+      specbleach_process(plug->lib_instance[channel], block_size,
+                         &process->audio_inputs[0].data32[channel][i],
+                         &process->audio_outputs[0].data32[channel][i]);
+      signal_crossfade_run(plug->soft_bypass, block_size,
+                           &process->audio_inputs[0].data32[channel][i],
+                           &process->audio_outputs[0].data32[channel][i],
+                           plug->enable);
+    }
 
     i = next_ev_frame;
   }
@@ -855,14 +857,15 @@ noise_repellent_process(const struct clap_plugin *plugin,
   {
     noise_profile_state *state =
         writable_noise_profile_state(&plug->current_noise_profile);
-    state->size = specbleach_get_noise_profile_size(plug->lib_instance_1);
+    state->size = specbleach_get_noise_profile_size(plug->lib_instance[0]);
     state->blocks_averaged =
-        specbleach_get_noise_profile_blocks_averaged(plug->lib_instance_1);
+        specbleach_get_noise_profile_blocks_averaged(plug->lib_instance[0]);
     assert(state->size <= NOISE_PROFILE_MAX_SIZE);
-    memcpy(state->left, specbleach_get_noise_profile(plug->lib_instance_1),
-           sizeof(float) * state->size);
-    memcpy(state->right, specbleach_get_noise_profile(plug->lib_instance_2),
-           sizeof(float) * state->size);
+    for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+      memcpy(state->channels[channel],
+             specbleach_get_noise_profile(plug->lib_instance[channel]),
+             sizeof(float) * state->size);
+    }
     publish_noise_profile_state(&plug->current_noise_profile);
   }
 
@@ -885,10 +888,13 @@ noise_repellent_get_extension(const struct clap_plugin *plugin,
 
 static void noise_repellent_on_main_thread(const struct clap_plugin *plugin) {}
 
-clap_plugin_t *noise_repellent_create(const clap_host_t *host) {
+clap_plugin_t *noise_repellent_create(const clap_host_t *host,
+                                      const clap_plugin_descriptor_t *desc,
+                                      uint32_t channel_count) {
   clap_noise_repellent *p = calloc(1, sizeof(*p));
+  p->channel_count = channel_count;
   p->host = host;
-  p->plugin.desc = &s_noise_repellent_desc;
+  p->plugin.desc = desc;
   p->plugin.plugin_data = p;
   p->plugin.init = noise_repellent_init;
   p->plugin.destroy = noise_repellent_destroy;
@@ -900,8 +906,15 @@ clap_plugin_t *noise_repellent_create(const clap_host_t *host) {
   p->plugin.process = noise_repellent_process;
   p->plugin.get_extension = noise_repellent_get_extension;
   p->plugin.on_main_thread = noise_repellent_on_main_thread;
-
   return &p->plugin;
+}
+
+clap_plugin_t *noise_repellent_create_stereo(const clap_host_t *host) {
+  return noise_repellent_create(host, &s_noise_repellent_desc_stereo, 2);
+}
+
+clap_plugin_t *noise_repellent_create_mono(const clap_host_t *host) {
+  return noise_repellent_create(host, &s_noise_repellent_desc_mono, 1);
 }
 
 /////////////////////////
@@ -913,8 +926,12 @@ static struct {
   clap_plugin_t *(*create)(const clap_host_t *host);
 } s_plugins[] = {
     {
-        .desc = &s_noise_repellent_desc,
-        .create = noise_repellent_create,
+        .desc = &s_noise_repellent_desc_stereo,
+        .create = noise_repellent_create_stereo,
+    },
+    {
+        .desc = &s_noise_repellent_desc_mono,
+        .create = noise_repellent_create_mono,
     },
 };
 
