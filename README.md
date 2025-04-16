@@ -13,6 +13,7 @@ As of writing this (April 2024), the original version is not maintained, and has
 - There is no adaptive mode
 - There is no mono mode. Only stereo.
 - It fixes state saving ([issue](https://github.com/lucianodato/noise-repellent/issues/114))
+- It fixes input latency ([issue1](https://github.com/lucianodato/libspecbleach/issues/56), [issue2](https://github.com/lucianodato/noise-repellent/issues/116))
 - The library code (libspecbleach) and plugin code (noise-repellent) are in a single repository - this was just done for convenience
 
 ## Building
