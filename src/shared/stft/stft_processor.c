@@ -58,14 +58,14 @@ StftProcessor *stft_processor_initialize(const uint32_t sample_rate,
   self->fft_size = get_fft_size(self->fft_transform);
   self->overlap_factor = overlap_factor;
   self->hop = self->frame_size / self->overlap_factor;
-  self->input_latency = self->frame_size - self->hop;
+  self->input_latency = self->frame_size;
 
   self->output_accumulator =
       (float *)calloc(self->frame_size * 2L, sizeof(float));
   self->tmp_buffer = (float *)calloc(self->frame_size, sizeof(float));
 
-  self->stft_buffer =
-      stft_buffer_initialize(self->frame_size, self->input_latency, self->hop);
+  self->stft_buffer = stft_buffer_initialize(
+      self->frame_size, self->input_latency - self->hop, self->hop);
 
   self->stft_windows = stft_window_initialize(
       self->fft_size, self->overlap_factor, input_window, output_window);
