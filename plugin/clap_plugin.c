@@ -779,23 +779,6 @@ noise_repellent_process(const struct clap_plugin *plugin,
   uint32_t ev_index = 0;
   uint32_t next_ev_frame = nev > 0 ? 0 : nframes;
 
-  // Update the parameters struct for the spectral bleach instances
-  SpectralBleachParameters parameters = {
-      .learn_noise = (int)plug->learn_noise,
-      .residual_listen = plug->residual_listen,
-      .reduction_amount = plug->amount,
-      .smoothing_factor = plug->smoothing,
-      .transient_protection = plug->transient_protection,
-      .whitening_factor = plug->whitening,
-      .noise_scaling_type = (int)plug->noise_scaling_type,
-      .noise_rescale = plug->offset,
-      .post_filter_threshold = plug->post_filter_threshold,
-  };
-
-  for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
-    specbleach_load_parameters(plug->lib_instance[channel], parameters);
-  }
-
   // Consume pending noise profile changes
   {
     noise_profile_state *state;
@@ -807,14 +790,6 @@ noise_repellent_process(const struct clap_plugin *plugin,
                                       state->blocks_averaged);
       }
     }
-  }
-
-  // Handle reset noise profile if needed
-  if (plug->reset_profile) {
-    for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
-      specbleach_reset_noise_profile(plug->lib_instance[channel]);
-    }
-    plug->reset_profile = false; // Reset the trigger
   }
 
   for (uint32_t i = 0; i < nframes;) {
@@ -839,6 +814,31 @@ noise_repellent_process(const struct clap_plugin *plugin,
 
     /* process audio until the next event */
     const uint32_t block_size = next_ev_frame - i;
+
+    // Update the parameters struct for the spectral bleach instances
+    SpectralBleachParameters parameters = {
+        .learn_noise = (int)plug->learn_noise,
+        .residual_listen = plug->residual_listen,
+        .reduction_amount = plug->amount,
+        .smoothing_factor = plug->smoothing,
+        .transient_protection = plug->transient_protection,
+        .whitening_factor = plug->whitening,
+        .noise_scaling_type = (int)plug->noise_scaling_type,
+        .noise_rescale = plug->offset,
+        .post_filter_threshold = plug->post_filter_threshold,
+    };
+
+    for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+      specbleach_load_parameters(plug->lib_instance[channel], parameters);
+    }
+
+    // Handle reset noise profile if needed
+    if (plug->reset_profile) {
+      for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+        specbleach_reset_noise_profile(plug->lib_instance[channel]);
+      }
+      plug->reset_profile = false; // Reset the trigger
+    }
 
     for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
       specbleach_process(plug->lib_instance[channel], block_size,
