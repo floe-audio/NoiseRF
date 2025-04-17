@@ -136,14 +136,8 @@ bool specbleach_load_noise_profile(SpectralBleachHandle instance,
 
   SbSpectralDenoiser *self = (SbSpectralDenoiser *)instance;
 
-  if (profile_size != get_noise_profile_size(self->noise_profile)) {
-    return false;
-  }
-
-  set_noise_profile(self->noise_profile, restored_profile, profile_size,
-                    averaged_blocks);
-
-  return true;
+  return set_noise_profile(self->noise_profile, restored_profile, profile_size,
+                           averaged_blocks);
 }
 
 bool specbleach_reset_noise_profile(SpectralBleachHandle instance) {
@@ -153,9 +147,7 @@ bool specbleach_reset_noise_profile(SpectralBleachHandle instance) {
 
   SbSpectralDenoiser *self = (SbSpectralDenoiser *)instance;
 
-  reset_noise_profile(self->noise_profile);
-
-  return true;
+  return reset_noise_profile(self->noise_profile);
 }
 
 bool specbleach_noise_profile_available(SpectralBleachHandle instance) {

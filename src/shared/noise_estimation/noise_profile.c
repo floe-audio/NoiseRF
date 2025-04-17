@@ -68,14 +68,43 @@ void set_noise_profile_available(NoiseProfile *self) {
 bool set_noise_profile(NoiseProfile *self, const float *noise_profile,
                        const uint32_t noise_profile_size,
                        const uint32_t noise_profile_blocks_averaged) {
-  if (!self || !noise_profile ||
-      noise_profile_size != self->noise_profile_size) {
+  if (!self || !noise_profile) {
     return false;
   }
-  memcpy(self->noise_profile, noise_profile,
-         noise_profile_size * sizeof(float));
 
-  self->noise_profile_size = noise_profile_size;
+  // Check if sizes match - direct copy if they do
+  if (noise_profile_size == self->noise_profile_size) {
+    memcpy(self->noise_profile, noise_profile,
+           noise_profile_size * sizeof(float));
+  } else {
+    // Sizes don't match - need to resize
+
+    // Copy DC component (index 0) directly
+    self->noise_profile[0] = noise_profile[0];
+
+    // Linear interpolation for the rest of the spectrum
+    for (uint32_t k = 1; k < self->noise_profile_size; k++) {
+      // Calculate the equivalent position in the source spectrum
+      float src_idx = (float)k * (float)(noise_profile_size - 1) /
+                      (float)(self->noise_profile_size - 1);
+
+      // Get integer indices for interpolation
+      uint32_t idx_low = (uint32_t)src_idx;
+      uint32_t idx_high = idx_low + 1;
+      if (idx_high >= noise_profile_size) {
+        idx_high = noise_profile_size - 1;
+      }
+
+      // Calculate interpolation factor
+      float alpha = src_idx - (float)idx_low;
+
+      // Perform linear interpolation for power spectrum values
+      self->noise_profile[k] = (1.0f - alpha) * noise_profile[idx_low] +
+                               alpha * noise_profile[idx_high];
+    }
+  }
+
+  // Update metadata
   self->noise_profile_blocks_averaged = noise_profile_blocks_averaged;
   self->noise_spectrum_available = true;
 
