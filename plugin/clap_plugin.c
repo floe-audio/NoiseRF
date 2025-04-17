@@ -23,7 +23,7 @@
 #include "signal_crossfade.h"
 #include "specbleach_denoiser.h"
 
-static const clap_plugin_descriptor_t s_noiserf_desc_stereo = {
+static const clap_plugin_descriptor_t s_desc_stereo = {
     .clap_version = CLAP_VERSION_INIT,
     .id = PROJECT_ID,
     .name = PROJECT_NAME,
@@ -38,7 +38,7 @@ static const clap_plugin_descriptor_t s_noiserf_desc_stereo = {
                                  CLAP_PLUGIN_FEATURE_RESTORATION, NULL},
 };
 
-static const clap_plugin_descriptor_t s_noiserf_desc_mono = {
+static const clap_plugin_descriptor_t s_desc_mono = {
     .clap_version = CLAP_VERSION_INIT,
     .id = PROJECT_ID ".mono",
     .name = PROJECT_NAME " Mono",
@@ -149,8 +149,7 @@ typedef struct {
   float noise_profile[2][NOISE_PROFILE_MAX_SIZE]; // audio thread
 } clap_noiserf;
 
-static void noiserf_process_event(clap_noiserf *plug,
-                                  const clap_event_header_t *hdr);
+static void process_event(clap_noiserf *plug, const clap_event_header_t *hdr);
 
 static void set_all_params_to_default(clap_noiserf *plug);
 
@@ -158,14 +157,12 @@ static void set_all_params_to_default(clap_noiserf *plug);
 // clap_plugin_audio_ports //
 /////////////////////////////
 
-static uint32_t noiserf_audio_ports_count(const clap_plugin_t *plugin,
-                                          bool is_input) {
+static uint32_t audio_ports_count(const clap_plugin_t *plugin, bool is_input) {
   return 1;
 }
 
-static bool noiserf_audio_ports_get(const clap_plugin_t *plugin, uint32_t index,
-                                    bool is_input,
-                                    clap_audio_port_info_t *info) {
+static bool audio_ports_get(const clap_plugin_t *plugin, uint32_t index,
+                            bool is_input, clap_audio_port_info_t *info) {
   clap_noiserf *plug = plugin->plugin_data;
   if (index > 0)
     return false;
@@ -182,16 +179,16 @@ static bool noiserf_audio_ports_get(const clap_plugin_t *plugin, uint32_t index,
   return true;
 }
 
-static const clap_plugin_audio_ports_t s_noiserf_audio_ports = {
-    .count = noiserf_audio_ports_count,
-    .get = noiserf_audio_ports_get,
+static const clap_plugin_audio_ports_t s_audio_ports = {
+    .count = audio_ports_count,
+    .get = audio_ports_get,
 };
 
 //////////////////
 // clap_latency //
 //////////////////
 
-uint32_t noiserf_latency_get(const clap_plugin_t *plugin) {
+uint32_t latency_get(const clap_plugin_t *plugin) {
   clap_noiserf *plug = plugin->plugin_data;
   if (!plug->lib_instance[0]) {
     return 0;
@@ -199,8 +196,8 @@ uint32_t noiserf_latency_get(const clap_plugin_t *plugin) {
   return specbleach_get_latency(plug->lib_instance[0]);
 }
 
-static const clap_plugin_latency_t s_noiserf_latency = {
-    .get = noiserf_latency_get,
+static const clap_plugin_latency_t s_latency = {
+    .get = latency_get,
 };
 
 //////////////////
@@ -245,12 +242,10 @@ static void set_value(clap_noiserf *plug, uint32_t param_id, double value) {
   }
 }
 
-uint32_t noiserf_param_count(const clap_plugin_t *plugin) {
-  return PARAMS_COUNT;
-}
+uint32_t param_count(const clap_plugin_t *plugin) { return PARAMS_COUNT; }
 
-bool noiserf_param_get_info(const clap_plugin_t *plugin, uint32_t param_index,
-                            clap_param_info_t *param_info) {
+bool param_get_info(const clap_plugin_t *plugin, uint32_t param_index,
+                    clap_param_info_t *param_info) {
   *param_info = (clap_param_info_t){};
   switch (param_index) {
   case 0:
@@ -369,8 +364,8 @@ bool noiserf_param_get_info(const clap_plugin_t *plugin, uint32_t param_index,
   return true;
 }
 
-bool noiserf_param_get_value(const clap_plugin_t *plugin, clap_id param_id,
-                             double *value) {
+bool param_get_value(const clap_plugin_t *plugin, clap_id param_id,
+                     double *value) {
   clap_noiserf *plug = plugin->plugin_data;
 
   switch (param_id) {
@@ -412,8 +407,8 @@ bool noiserf_param_get_value(const clap_plugin_t *plugin, clap_id param_id,
   return false;
 }
 
-bool noiserf_param_value_to_text(const clap_plugin_t *plugin, clap_id param_id,
-                                 double value, char *display, uint32_t size) {
+bool param_value_to_text(const clap_plugin_t *plugin, clap_id param_id,
+                         double value, char *display, uint32_t size) {
   switch (param_id) {
   case pid_AMOUNT:
   case pid_OFFSET:
@@ -476,30 +471,30 @@ bool noiserf_param_value_to_text(const clap_plugin_t *plugin, clap_id param_id,
   return false;
 }
 
-bool noiserf_text_to_value(const clap_plugin_t *plugin, clap_id param_id,
-                           const char *display, double *value) {
+bool text_to_value(const clap_plugin_t *plugin, clap_id param_id,
+                   const char *display, double *value) {
   // Not implemented
   return false;
 }
 
-void noiserf_flush(const clap_plugin_t *plugin, const clap_input_events_t *in,
-                   const clap_output_events_t *out) {
+void flush(const clap_plugin_t *plugin, const clap_input_events_t *in,
+           const clap_output_events_t *out) {
   clap_noiserf *plug = plugin->plugin_data;
   int s = in->size(in);
   int q;
   for (q = 0; q < s; ++q) {
     const clap_event_header_t *hdr = in->get(in, q);
-    noiserf_process_event(plug, hdr);
+    process_event(plug, hdr);
   }
 }
 
-static const clap_plugin_params_t s_noiserf_params = {
-    .count = noiserf_param_count,
-    .get_info = noiserf_param_get_info,
-    .get_value = noiserf_param_get_value,
-    .value_to_text = noiserf_param_value_to_text,
-    .text_to_value = noiserf_text_to_value,
-    .flush = noiserf_flush};
+static const clap_plugin_params_t s_params = {.count = param_count,
+                                              .get_info = param_get_info,
+                                              .get_value = param_get_value,
+                                              .value_to_text =
+                                                  param_value_to_text,
+                                              .text_to_value = text_to_value,
+                                              .flush = flush};
 
 /////////////////
 // clap_state //
@@ -554,8 +549,8 @@ static bool code(const struct state_coder *coder, const void *buffer,
   }
 }
 
-static bool noiserf_code_state(const clap_plugin_t *plugin,
-                               const struct state_coder *coder) {
+static bool code_state(const clap_plugin_t *plugin,
+                       const struct state_coder *coder) {
   clap_noiserf *plug = plugin->plugin_data;
 
   // We might need to use this in the future.
@@ -577,7 +572,7 @@ static bool noiserf_code_state(const clap_plugin_t *plugin,
     uint32_t param_id;
     if (coder->mode == coding_ENCODE) {
       clap_param_info_t param_info;
-      const bool got_info = noiserf_param_get_info(plugin, i, &param_info);
+      const bool got_info = param_get_info(plugin, i, &param_info);
       assert(got_info);
       param_id = param_info.id;
     }
@@ -587,7 +582,7 @@ static bool noiserf_code_state(const clap_plugin_t *plugin,
 
     double value = 0.0;
     if (coder->mode == coding_ENCODE) {
-      const bool got_value = noiserf_param_get_value(plugin, param_id, &value);
+      const bool got_value = param_get_value(plugin, param_id, &value);
       assert(got_value);
     }
     if (!code(coder, &value, sizeof(value))) {
@@ -626,8 +621,7 @@ static bool noiserf_code_state(const clap_plugin_t *plugin,
   return true;
 }
 
-bool noiserf_state_save(const clap_plugin_t *plugin,
-                        const clap_ostream_t *stream) {
+bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream) {
   clap_noiserf *plug = plugin->plugin_data;
 
   const struct state_coder coder = {
@@ -635,11 +629,10 @@ bool noiserf_state_save(const clap_plugin_t *plugin,
       .ostream = stream,
   };
 
-  return noiserf_code_state(plugin, &coder);
+  return code_state(plugin, &coder);
 }
 
-bool noiserf_state_load(const clap_plugin_t *plugin,
-                        const clap_istream_t *stream) {
+bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream) {
   clap_noiserf *plug = plugin->plugin_data;
 
   const struct state_coder coder = {
@@ -647,7 +640,7 @@ bool noiserf_state_load(const clap_plugin_t *plugin,
       .istream = stream,
   };
 
-  const bool result = noiserf_code_state(plugin, &coder);
+  const bool result = code_state(plugin, &coder);
 
   // Notify host that parameter values might have changed
   const clap_host_t *clapHost = plug->host;
@@ -662,9 +655,9 @@ bool noiserf_state_load(const clap_plugin_t *plugin,
   return result;
 }
 
-static const clap_plugin_state_t s_noiserf_state = {
-    .save = noiserf_state_save,
-    .load = noiserf_state_load,
+static const clap_plugin_state_t s_state = {
+    .save = state_save,
+    .load = state_load,
 };
 
 /////////////////
@@ -674,12 +667,12 @@ static const clap_plugin_state_t s_noiserf_state = {
 static void set_all_params_to_default(clap_noiserf *plug) {
   for (uint32_t i = 0; i < PARAMS_COUNT; ++i) {
     clap_param_info_t param_info;
-    noiserf_param_get_info(&plug->plugin, i, &param_info);
+    param_get_info(&plug->plugin, i, &param_info);
     set_value(plug, param_info.id, param_info.default_value);
   }
 }
 
-static bool noiserf_init(const struct clap_plugin *plugin) {
+static bool init(const struct clap_plugin *plugin) {
   clap_noiserf *plug = plugin->plugin_data;
 
   // Fetch host's extensions here
@@ -694,15 +687,14 @@ static bool noiserf_init(const struct clap_plugin *plugin) {
   return true;
 }
 
-static void noiserf_destroy(const struct clap_plugin *plugin) {
+static void destroy(const struct clap_plugin *plugin) {
   clap_noiserf *plug = plugin->plugin_data;
 
   free(plug);
 }
 
-static bool noiserf_activate(const struct clap_plugin *plugin,
-                             double sample_rate, uint32_t min_frames_count,
-                             uint32_t max_frames_count) {
+static bool activate(const struct clap_plugin *plugin, double sample_rate,
+                     uint32_t min_frames_count, uint32_t max_frames_count) {
   clap_noiserf *plug = plugin->plugin_data;
 
   if (sample_rate > 192000.0)
@@ -731,7 +723,7 @@ static bool noiserf_activate(const struct clap_plugin *plugin,
   return true;
 }
 
-static void noiserf_deactivate(const struct clap_plugin *plugin) {
+static void deactivate(const struct clap_plugin *plugin) {
   clap_noiserf *plug = plugin->plugin_data;
 
   for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
@@ -745,16 +737,13 @@ static void noiserf_deactivate(const struct clap_plugin *plugin) {
   }
 }
 
-static bool noiserf_start_processing(const struct clap_plugin *plugin) {
-  return true;
-}
+static bool start_processing(const struct clap_plugin *plugin) { return true; }
 
-static void noiserf_stop_processing(const struct clap_plugin *plugin) {}
+static void stop_processing(const struct clap_plugin *plugin) {}
 
-static void noiserf_reset(const struct clap_plugin *plugin) {}
+static void reset(const struct clap_plugin *plugin) {}
 
-static void noiserf_process_event(clap_noiserf *plug,
-                                  const clap_event_header_t *hdr) {
+static void process_event(clap_noiserf *plug, const clap_event_header_t *hdr) {
   if (hdr->space_id == CLAP_CORE_EVENT_SPACE_ID) {
     switch (hdr->type) {
     case CLAP_EVENT_PARAM_VALUE: {
@@ -768,8 +757,8 @@ static void noiserf_process_event(clap_noiserf *plug,
   }
 }
 
-static clap_process_status noiserf_process(const struct clap_plugin *plugin,
-                                           const clap_process_t *process) {
+static clap_process_status process(const struct clap_plugin *plugin,
+                                   const clap_process_t *process) {
   clap_noiserf *plug = plugin->plugin_data;
   const uint32_t nframes = process->frames_count;
   const uint32_t nev = process->in_events->size(process->in_events);
@@ -799,7 +788,7 @@ static clap_process_status noiserf_process(const struct clap_plugin *plugin,
         break;
       }
 
-      noiserf_process_event(plug, hdr);
+      process_event(plug, hdr);
       ++ev_index;
 
       if (ev_index == nev) {
@@ -869,48 +858,48 @@ static clap_process_status noiserf_process(const struct clap_plugin *plugin,
   return CLAP_PROCESS_CONTINUE;
 }
 
-static const void *noiserf_get_extension(const struct clap_plugin *plugin,
-                                         const char *id) {
+static const void *get_extension(const struct clap_plugin *plugin,
+                                 const char *id) {
   if (!strcmp(id, CLAP_EXT_LATENCY))
-    return &s_noiserf_latency;
+    return &s_latency;
   if (!strcmp(id, CLAP_EXT_AUDIO_PORTS))
-    return &s_noiserf_audio_ports;
+    return &s_audio_ports;
   if (!strcmp(id, CLAP_EXT_PARAMS))
-    return &s_noiserf_params;
+    return &s_params;
   if (!strcmp(id, CLAP_EXT_STATE))
-    return &s_noiserf_state;
+    return &s_state;
   return NULL;
 }
 
-static void noiserf_on_main_thread(const struct clap_plugin *plugin) {}
+static void on_main_thread(const struct clap_plugin *plugin) {}
 
-clap_plugin_t *noiserf_create(const clap_host_t *host,
-                              const clap_plugin_descriptor_t *desc,
-                              uint32_t channel_count) {
+clap_plugin_t *create(const clap_host_t *host,
+                      const clap_plugin_descriptor_t *desc,
+                      uint32_t channel_count) {
   clap_noiserf *p = calloc(1, sizeof(*p));
   p->channel_count = channel_count;
   p->host = host;
   p->plugin.desc = desc;
   p->plugin.plugin_data = p;
-  p->plugin.init = noiserf_init;
-  p->plugin.destroy = noiserf_destroy;
-  p->plugin.activate = noiserf_activate;
-  p->plugin.deactivate = noiserf_deactivate;
-  p->plugin.start_processing = noiserf_start_processing;
-  p->plugin.stop_processing = noiserf_stop_processing;
-  p->plugin.reset = noiserf_reset;
-  p->plugin.process = noiserf_process;
-  p->plugin.get_extension = noiserf_get_extension;
-  p->plugin.on_main_thread = noiserf_on_main_thread;
+  p->plugin.init = init;
+  p->plugin.destroy = destroy;
+  p->plugin.activate = activate;
+  p->plugin.deactivate = deactivate;
+  p->plugin.start_processing = start_processing;
+  p->plugin.stop_processing = stop_processing;
+  p->plugin.reset = reset;
+  p->plugin.process = process;
+  p->plugin.get_extension = get_extension;
+  p->plugin.on_main_thread = on_main_thread;
   return &p->plugin;
 }
 
-clap_plugin_t *noiserf_create_stereo(const clap_host_t *host) {
-  return noiserf_create(host, &s_noiserf_desc_stereo, 2);
+clap_plugin_t *create_stereo(const clap_host_t *host) {
+  return create(host, &s_desc_stereo, 2);
 }
 
-clap_plugin_t *noiserf_create_mono(const clap_host_t *host) {
-  return noiserf_create(host, &s_noiserf_desc_mono, 1);
+clap_plugin_t *create_mono(const clap_host_t *host) {
+  return create(host, &s_desc_mono, 1);
 }
 
 /////////////////////////
@@ -922,12 +911,12 @@ static struct {
   clap_plugin_t *(*create)(const clap_host_t *host);
 } s_plugins[] = {
     {
-        .desc = &s_noiserf_desc_stereo,
-        .create = noiserf_create_stereo,
+        .desc = &s_desc_stereo,
+        .create = create_stereo,
     },
     {
-        .desc = &s_noiserf_desc_mono,
-        .create = noiserf_create_mono,
+        .desc = &s_desc_mono,
+        .create = create_mono,
     },
 };
 
