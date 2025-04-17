@@ -23,7 +23,7 @@
 #include "signal_crossfade.h"
 #include "specbleach_denoiser.h"
 
-static const clap_plugin_descriptor_t s_noise_repellent_desc_stereo = {
+static const clap_plugin_descriptor_t s_noiserf_desc_stereo = {
     .clap_version = CLAP_VERSION_INIT,
     .id = PROJECT_ID,
     .name = PROJECT_NAME,
@@ -38,7 +38,7 @@ static const clap_plugin_descriptor_t s_noise_repellent_desc_stereo = {
                                  CLAP_PLUGIN_FEATURE_RESTORATION, NULL},
 };
 
-static const clap_plugin_descriptor_t s_noise_repellent_desc_mono = {
+static const clap_plugin_descriptor_t s_noiserf_desc_mono = {
     .clap_version = CLAP_VERSION_INIT,
     .id = PROJECT_ID ".mono",
     .name = PROJECT_NAME " Mono",
@@ -53,7 +53,7 @@ static const clap_plugin_descriptor_t s_noise_repellent_desc_mono = {
                                  CLAP_PLUGIN_FEATURE_RESTORATION, NULL},
 };
 
-enum ParamIds {
+enum param_ids {
   pid_AMOUNT = 238,
   pid_OFFSET = 1923048,
   pid_SMOOTHING = 349857,
@@ -147,26 +147,26 @@ typedef struct {
   SignalCrossfade *soft_bypass;
   SpectralBleachHandle lib_instance[2];
   float noise_profile[2][NOISE_PROFILE_MAX_SIZE]; // audio thread
-} clap_noise_repellent;
+} clap_noiserf;
 
-static void noise_repellent_process_event(clap_noise_repellent *plug,
-                                          const clap_event_header_t *hdr);
+static void noiserf_process_event(clap_noiserf *plug,
+                                  const clap_event_header_t *hdr);
 
-static void set_all_params_to_default(clap_noise_repellent *plug);
+static void set_all_params_to_default(clap_noiserf *plug);
 
 /////////////////////////////
 // clap_plugin_audio_ports //
 /////////////////////////////
 
-static uint32_t noise_repellent_audio_ports_count(const clap_plugin_t *plugin,
-                                                  bool is_input) {
+static uint32_t noiserf_audio_ports_count(const clap_plugin_t *plugin,
+                                          bool is_input) {
   return 1;
 }
 
-static bool noise_repellent_audio_ports_get(const clap_plugin_t *plugin,
-                                            uint32_t index, bool is_input,
-                                            clap_audio_port_info_t *info) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+static bool noiserf_audio_ports_get(const clap_plugin_t *plugin, uint32_t index,
+                                    bool is_input,
+                                    clap_audio_port_info_t *info) {
+  clap_noiserf *plug = plugin->plugin_data;
   if (index > 0)
     return false;
   info->id = 0;
@@ -182,33 +182,32 @@ static bool noise_repellent_audio_ports_get(const clap_plugin_t *plugin,
   return true;
 }
 
-static const clap_plugin_audio_ports_t s_noise_repellent_audio_ports = {
-    .count = noise_repellent_audio_ports_count,
-    .get = noise_repellent_audio_ports_get,
+static const clap_plugin_audio_ports_t s_noiserf_audio_ports = {
+    .count = noiserf_audio_ports_count,
+    .get = noiserf_audio_ports_get,
 };
 
 //////////////////
 // clap_latency //
 //////////////////
 
-uint32_t noise_repellent_latency_get(const clap_plugin_t *plugin) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+uint32_t noiserf_latency_get(const clap_plugin_t *plugin) {
+  clap_noiserf *plug = plugin->plugin_data;
   if (!plug->lib_instance[0]) {
     return 0;
   }
   return specbleach_get_latency(plug->lib_instance[0]);
 }
 
-static const clap_plugin_latency_t s_noise_repellent_latency = {
-    .get = noise_repellent_latency_get,
+static const clap_plugin_latency_t s_noiserf_latency = {
+    .get = noiserf_latency_get,
 };
 
 //////////////////
 // clap_params //
 //////////////////
 
-static void set_value(clap_noise_repellent *plug, uint32_t param_id,
-                      double value) {
+static void set_value(clap_noiserf *plug, uint32_t param_id, double value) {
   switch (param_id) {
   case pid_AMOUNT:
     plug->amount = value;
@@ -246,13 +245,12 @@ static void set_value(clap_noise_repellent *plug, uint32_t param_id,
   }
 }
 
-uint32_t noise_repellent_param_count(const clap_plugin_t *plugin) {
+uint32_t noiserf_param_count(const clap_plugin_t *plugin) {
   return PARAMS_COUNT;
 }
 
-bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
-                                    uint32_t param_index,
-                                    clap_param_info_t *param_info) {
+bool noiserf_param_get_info(const clap_plugin_t *plugin, uint32_t param_index,
+                            clap_param_info_t *param_info) {
   *param_info = (clap_param_info_t){};
   switch (param_index) {
   case 0:
@@ -371,9 +369,9 @@ bool noise_repellent_param_get_info(const clap_plugin_t *plugin,
   return true;
 }
 
-bool noise_repellent_param_get_value(const clap_plugin_t *plugin,
-                                     clap_id param_id, double *value) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+bool noiserf_param_get_value(const clap_plugin_t *plugin, clap_id param_id,
+                             double *value) {
+  clap_noiserf *plug = plugin->plugin_data;
 
   switch (param_id) {
   case pid_AMOUNT:
@@ -414,9 +412,8 @@ bool noise_repellent_param_get_value(const clap_plugin_t *plugin,
   return false;
 }
 
-bool noise_repellent_param_value_to_text(const clap_plugin_t *plugin,
-                                         clap_id param_id, double value,
-                                         char *display, uint32_t size) {
+bool noiserf_param_value_to_text(const clap_plugin_t *plugin, clap_id param_id,
+                                 double value, char *display, uint32_t size) {
   switch (param_id) {
   case pid_AMOUNT:
   case pid_OFFSET:
@@ -479,32 +476,30 @@ bool noise_repellent_param_value_to_text(const clap_plugin_t *plugin,
   return false;
 }
 
-bool noise_repellent_text_to_value(const clap_plugin_t *plugin,
-                                   clap_id param_id, const char *display,
-                                   double *value) {
+bool noiserf_text_to_value(const clap_plugin_t *plugin, clap_id param_id,
+                           const char *display, double *value) {
   // Not implemented
   return false;
 }
 
-void noise_repellent_flush(const clap_plugin_t *plugin,
-                           const clap_input_events_t *in,
-                           const clap_output_events_t *out) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+void noiserf_flush(const clap_plugin_t *plugin, const clap_input_events_t *in,
+                   const clap_output_events_t *out) {
+  clap_noiserf *plug = plugin->plugin_data;
   int s = in->size(in);
   int q;
   for (q = 0; q < s; ++q) {
     const clap_event_header_t *hdr = in->get(in, q);
-    noise_repellent_process_event(plug, hdr);
+    noiserf_process_event(plug, hdr);
   }
 }
 
-static const clap_plugin_params_t s_noise_repellent_params = {
-    .count = noise_repellent_param_count,
-    .get_info = noise_repellent_param_get_info,
-    .get_value = noise_repellent_param_get_value,
-    .value_to_text = noise_repellent_param_value_to_text,
-    .text_to_value = noise_repellent_text_to_value,
-    .flush = noise_repellent_flush};
+static const clap_plugin_params_t s_noiserf_params = {
+    .count = noiserf_param_count,
+    .get_info = noiserf_param_get_info,
+    .get_value = noiserf_param_get_value,
+    .value_to_text = noiserf_param_value_to_text,
+    .text_to_value = noiserf_text_to_value,
+    .flush = noiserf_flush};
 
 /////////////////
 // clap_state //
@@ -559,9 +554,9 @@ static bool code(const struct state_coder *coder, const void *buffer,
   }
 }
 
-static bool noise_repellent_code_state(const clap_plugin_t *plugin,
-                                       const struct state_coder *coder) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+static bool noiserf_code_state(const clap_plugin_t *plugin,
+                               const struct state_coder *coder) {
+  clap_noiserf *plug = plugin->plugin_data;
 
   // We might need to use this in the future.
   uint32_t version = 1;
@@ -582,8 +577,7 @@ static bool noise_repellent_code_state(const clap_plugin_t *plugin,
     uint32_t param_id;
     if (coder->mode == coding_ENCODE) {
       clap_param_info_t param_info;
-      const bool got_info =
-          noise_repellent_param_get_info(plugin, i, &param_info);
+      const bool got_info = noiserf_param_get_info(plugin, i, &param_info);
       assert(got_info);
       param_id = param_info.id;
     }
@@ -593,8 +587,7 @@ static bool noise_repellent_code_state(const clap_plugin_t *plugin,
 
     double value = 0.0;
     if (coder->mode == coding_ENCODE) {
-      const bool got_value =
-          noise_repellent_param_get_value(plugin, param_id, &value);
+      const bool got_value = noiserf_param_get_value(plugin, param_id, &value);
       assert(got_value);
     }
     if (!code(coder, &value, sizeof(value))) {
@@ -633,28 +626,28 @@ static bool noise_repellent_code_state(const clap_plugin_t *plugin,
   return true;
 }
 
-bool noise_repellent_state_save(const clap_plugin_t *plugin,
-                                const clap_ostream_t *stream) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+bool noiserf_state_save(const clap_plugin_t *plugin,
+                        const clap_ostream_t *stream) {
+  clap_noiserf *plug = plugin->plugin_data;
 
   const struct state_coder coder = {
       .mode = coding_ENCODE,
       .ostream = stream,
   };
 
-  return noise_repellent_code_state(plugin, &coder);
+  return noiserf_code_state(plugin, &coder);
 }
 
-bool noise_repellent_state_load(const clap_plugin_t *plugin,
-                                const clap_istream_t *stream) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+bool noiserf_state_load(const clap_plugin_t *plugin,
+                        const clap_istream_t *stream) {
+  clap_noiserf *plug = plugin->plugin_data;
 
   const struct state_coder coder = {
       .mode = coding_DECODE,
       .istream = stream,
   };
 
-  const bool result = noise_repellent_code_state(plugin, &coder);
+  const bool result = noiserf_code_state(plugin, &coder);
 
   // Notify host that parameter values might have changed
   const clap_host_t *clapHost = plug->host;
@@ -669,25 +662,25 @@ bool noise_repellent_state_load(const clap_plugin_t *plugin,
   return result;
 }
 
-static const clap_plugin_state_t s_noise_repellent_state = {
-    .save = noise_repellent_state_save,
-    .load = noise_repellent_state_load,
+static const clap_plugin_state_t s_noiserf_state = {
+    .save = noiserf_state_save,
+    .load = noiserf_state_load,
 };
 
 /////////////////
 // clap_plugin //
 /////////////////
 
-static void set_all_params_to_default(clap_noise_repellent *plug) {
+static void set_all_params_to_default(clap_noiserf *plug) {
   for (uint32_t i = 0; i < PARAMS_COUNT; ++i) {
     clap_param_info_t param_info;
-    noise_repellent_param_get_info(&plug->plugin, i, &param_info);
+    noiserf_param_get_info(&plug->plugin, i, &param_info);
     set_value(plug, param_info.id, param_info.default_value);
   }
 }
 
-static bool noise_repellent_init(const struct clap_plugin *plugin) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+static bool noiserf_init(const struct clap_plugin *plugin) {
+  clap_noiserf *plug = plugin->plugin_data;
 
   // Fetch host's extensions here
   plug->hostLog = plug->host->get_extension(plug->host, CLAP_EXT_LOG);
@@ -701,17 +694,16 @@ static bool noise_repellent_init(const struct clap_plugin *plugin) {
   return true;
 }
 
-static void noise_repellent_destroy(const struct clap_plugin *plugin) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+static void noiserf_destroy(const struct clap_plugin *plugin) {
+  clap_noiserf *plug = plugin->plugin_data;
 
   free(plug);
 }
 
-static bool noise_repellent_activate(const struct clap_plugin *plugin,
-                                     double sample_rate,
-                                     uint32_t min_frames_count,
-                                     uint32_t max_frames_count) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+static bool noiserf_activate(const struct clap_plugin *plugin,
+                             double sample_rate, uint32_t min_frames_count,
+                             uint32_t max_frames_count) {
+  clap_noiserf *plug = plugin->plugin_data;
 
   if (sample_rate > 192000.0)
     return false; // IMPROVE: support higher sample rates
@@ -739,8 +731,8 @@ static bool noise_repellent_activate(const struct clap_plugin *plugin,
   return true;
 }
 
-static void noise_repellent_deactivate(const struct clap_plugin *plugin) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+static void noiserf_deactivate(const struct clap_plugin *plugin) {
+  clap_noiserf *plug = plugin->plugin_data;
 
   for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
     if (plug->lib_instance[channel]) {
@@ -753,16 +745,16 @@ static void noise_repellent_deactivate(const struct clap_plugin *plugin) {
   }
 }
 
-static bool noise_repellent_start_processing(const struct clap_plugin *plugin) {
+static bool noiserf_start_processing(const struct clap_plugin *plugin) {
   return true;
 }
 
-static void noise_repellent_stop_processing(const struct clap_plugin *plugin) {}
+static void noiserf_stop_processing(const struct clap_plugin *plugin) {}
 
-static void noise_repellent_reset(const struct clap_plugin *plugin) {}
+static void noiserf_reset(const struct clap_plugin *plugin) {}
 
-static void noise_repellent_process_event(clap_noise_repellent *plug,
-                                          const clap_event_header_t *hdr) {
+static void noiserf_process_event(clap_noiserf *plug,
+                                  const clap_event_header_t *hdr) {
   if (hdr->space_id == CLAP_CORE_EVENT_SPACE_ID) {
     switch (hdr->type) {
     case CLAP_EVENT_PARAM_VALUE: {
@@ -776,10 +768,9 @@ static void noise_repellent_process_event(clap_noise_repellent *plug,
   }
 }
 
-static clap_process_status
-noise_repellent_process(const struct clap_plugin *plugin,
-                        const clap_process_t *process) {
-  clap_noise_repellent *plug = plugin->plugin_data;
+static clap_process_status noiserf_process(const struct clap_plugin *plugin,
+                                           const clap_process_t *process) {
+  clap_noiserf *plug = plugin->plugin_data;
   const uint32_t nframes = process->frames_count;
   const uint32_t nev = process->in_events->size(process->in_events);
   uint32_t ev_index = 0;
@@ -808,7 +799,7 @@ noise_repellent_process(const struct clap_plugin *plugin,
         break;
       }
 
-      noise_repellent_process_event(plug, hdr);
+      noiserf_process_event(plug, hdr);
       ++ev_index;
 
       if (ev_index == nev) {
@@ -878,49 +869,48 @@ noise_repellent_process(const struct clap_plugin *plugin,
   return CLAP_PROCESS_CONTINUE;
 }
 
-static const void *
-noise_repellent_get_extension(const struct clap_plugin *plugin,
-                              const char *id) {
+static const void *noiserf_get_extension(const struct clap_plugin *plugin,
+                                         const char *id) {
   if (!strcmp(id, CLAP_EXT_LATENCY))
-    return &s_noise_repellent_latency;
+    return &s_noiserf_latency;
   if (!strcmp(id, CLAP_EXT_AUDIO_PORTS))
-    return &s_noise_repellent_audio_ports;
+    return &s_noiserf_audio_ports;
   if (!strcmp(id, CLAP_EXT_PARAMS))
-    return &s_noise_repellent_params;
+    return &s_noiserf_params;
   if (!strcmp(id, CLAP_EXT_STATE))
-    return &s_noise_repellent_state;
+    return &s_noiserf_state;
   return NULL;
 }
 
-static void noise_repellent_on_main_thread(const struct clap_plugin *plugin) {}
+static void noiserf_on_main_thread(const struct clap_plugin *plugin) {}
 
-clap_plugin_t *noise_repellent_create(const clap_host_t *host,
-                                      const clap_plugin_descriptor_t *desc,
-                                      uint32_t channel_count) {
-  clap_noise_repellent *p = calloc(1, sizeof(*p));
+clap_plugin_t *noiserf_create(const clap_host_t *host,
+                              const clap_plugin_descriptor_t *desc,
+                              uint32_t channel_count) {
+  clap_noiserf *p = calloc(1, sizeof(*p));
   p->channel_count = channel_count;
   p->host = host;
   p->plugin.desc = desc;
   p->plugin.plugin_data = p;
-  p->plugin.init = noise_repellent_init;
-  p->plugin.destroy = noise_repellent_destroy;
-  p->plugin.activate = noise_repellent_activate;
-  p->plugin.deactivate = noise_repellent_deactivate;
-  p->plugin.start_processing = noise_repellent_start_processing;
-  p->plugin.stop_processing = noise_repellent_stop_processing;
-  p->plugin.reset = noise_repellent_reset;
-  p->plugin.process = noise_repellent_process;
-  p->plugin.get_extension = noise_repellent_get_extension;
-  p->plugin.on_main_thread = noise_repellent_on_main_thread;
+  p->plugin.init = noiserf_init;
+  p->plugin.destroy = noiserf_destroy;
+  p->plugin.activate = noiserf_activate;
+  p->plugin.deactivate = noiserf_deactivate;
+  p->plugin.start_processing = noiserf_start_processing;
+  p->plugin.stop_processing = noiserf_stop_processing;
+  p->plugin.reset = noiserf_reset;
+  p->plugin.process = noiserf_process;
+  p->plugin.get_extension = noiserf_get_extension;
+  p->plugin.on_main_thread = noiserf_on_main_thread;
   return &p->plugin;
 }
 
-clap_plugin_t *noise_repellent_create_stereo(const clap_host_t *host) {
-  return noise_repellent_create(host, &s_noise_repellent_desc_stereo, 2);
+clap_plugin_t *noiserf_create_stereo(const clap_host_t *host) {
+  return noiserf_create(host, &s_noiserf_desc_stereo, 2);
 }
 
-clap_plugin_t *noise_repellent_create_mono(const clap_host_t *host) {
-  return noise_repellent_create(host, &s_noise_repellent_desc_mono, 1);
+clap_plugin_t *noiserf_create_mono(const clap_host_t *host) {
+  return noiserf_create(host, &s_noiserf_desc_mono, 1);
 }
 
 /////////////////////////
@@ -932,12 +922,12 @@ static struct {
   clap_plugin_t *(*create)(const clap_host_t *host);
 } s_plugins[] = {
     {
-        .desc = &s_noise_repellent_desc_stereo,
-        .create = noise_repellent_create_stereo,
+        .desc = &s_noiserf_desc_stereo,
+        .create = noiserf_create_stereo,
     },
     {
-        .desc = &s_noise_repellent_desc_mono,
-        .create = noise_repellent_create_mono,
+        .desc = &s_noiserf_desc_mono,
+        .create = noiserf_create_mono,
     },
 };
 
