@@ -86,6 +86,14 @@ typedef struct {
   uint32_t front_buffer_index;          // consumer
 } noise_profile_state_swap_buffers;
 
+static void
+init_noise_profile_buffers(noise_profile_state_swap_buffers *buffers) {
+  assert(buffers->buffers[0].channels[0][0] == 0); // Must already be zeroed
+  buffers->middle_buffer_state = 1;
+  buffers->back_buffer_index = 0;
+  buffers->front_buffer_index = 2;
+}
+
 // producer
 static noise_profile_state *
 writable_noise_profile_state(noise_profile_state_swap_buffers *buffers) {
@@ -542,11 +550,46 @@ struct state_coder {
 
 static bool code(const struct state_coder *coder, const void *buffer,
                  size_t size) {
+  if (size == 0)
+    return true;
   if (coder->mode == coding_ENCODE) {
     return write_to_stream(coder->ostream, buffer, size);
   } else {
     return read_from_stream(coder->istream, (void *)buffer, size);
   }
+}
+
+// Main-thread. Only set consume_pending to true if the audio thread isn't
+// running.
+static noise_profile_state *current_noise_profile(const clap_noiserf *plug,
+                                                  bool consume_pending) {
+  noise_profile_state *state;
+
+  if (consume_pending && noise_profile_state_consume(
+                             &plug->pending_noise_profile_change, &state)) {
+    // Put it as the current
+    noise_profile_state *current =
+        writable_noise_profile_state(&plug->current_noise_profile);
+    current->blocks_averaged = state->blocks_averaged;
+    current->size = state->size;
+    for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+      memcpy(current->channels[channel], state->channels[channel],
+             sizeof(float) * state->size);
+    }
+    publish_noise_profile_state(&plug->current_noise_profile);
+    return state;
+  }
+
+  const uint32_t pending_middle_state =
+      plug->pending_noise_profile_change.middle_buffer_state;
+  if (pending_middle_state & TRIPLE_BUFFER_DIRTY_BIT) {
+    state = &plug->pending_noise_profile_change
+                 .buffers[pending_middle_state & TRIPLE_BUFFER_MASK];
+  } else {
+    noise_profile_state_consume(&plug->current_noise_profile, &state);
+  }
+
+  return state;
 }
 
 static bool code_state(const clap_plugin_t *plugin,
@@ -598,7 +641,10 @@ static bool code_state(const clap_plugin_t *plugin,
   if (coder->mode == coding_DECODE) {
     state = writable_noise_profile_state(&plug->pending_noise_profile_change);
   } else {
-    noise_profile_state_consume(&plug->current_noise_profile, &state);
+    // The audio thread might consume this buffer while we use it - making it
+    // the front buffer - but it's safe due to the fact that neither us nor
+    // the audio thread modify it.
+    state = current_noise_profile(plug, false);
   }
 
   assert(state->size <= NOISE_PROFILE_MAX_SIZE);
@@ -682,6 +728,8 @@ static bool init(const struct clap_plugin *plugin) {
   plug->hostLatency = plug->host->get_extension(plug->host, CLAP_EXT_LATENCY);
   plug->hostParams = plug->host->get_extension(plug->host, CLAP_EXT_PARAMS);
 
+  init_noise_profile_buffers(&plug->pending_noise_profile_change);
+  init_noise_profile_buffers(&plug->current_noise_profile);
   set_all_params_to_default(plug);
 
   return true;
@@ -717,8 +765,20 @@ static bool activate(const struct clap_plugin *plugin, double sample_rate,
 
   const uint32_t noise_profile_size =
       specbleach_get_noise_profile_size(plug->lib_instance[0]);
-  DEBUG_PRINT("Noise profile size: %u\n", noise_profile_size);
+
   assert(noise_profile_size <= NOISE_PROFILE_MAX_SIZE);
+
+  // If we have a current noise profile, load it into the instance. This might
+  // not be the first time we have been activated.
+  noise_profile_state *state = current_noise_profile(plug, true);
+  if (state->size != 0) {
+    for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
+      const bool loaded = specbleach_load_noise_profile(
+          plug->lib_instance[channel], state->channels[channel], state->size,
+          state->blocks_averaged);
+      assert(loaded);
+    }
+  }
 
   return true;
 }
@@ -760,27 +820,37 @@ static void process_event(clap_noiserf *plug, const clap_event_header_t *hdr) {
 static clap_process_status process(const struct clap_plugin *plugin,
                                    const clap_process_t *process) {
   clap_noiserf *plug = plugin->plugin_data;
-  const uint32_t nframes = process->frames_count;
-  const uint32_t nev = process->in_events->size(process->in_events);
+  const uint32_t frame_count = process->frames_count;
+  const uint32_t ev_count = process->in_events->size(process->in_events);
   uint32_t ev_index = 0;
-  uint32_t next_ev_frame = nev > 0 ? 0 : nframes;
+  uint32_t next_ev_frame = ev_count > 0 ? 0 : frame_count;
+
+  bool noise_profile_changed = false;
 
   // Consume pending noise profile changes
   {
     noise_profile_state *state;
     if (noise_profile_state_consume(&plug->pending_noise_profile_change,
                                     &state)) {
+      noise_profile_changed = true;
       for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
-        specbleach_load_noise_profile(plug->lib_instance[channel],
-                                      state->channels[channel], state->size,
-                                      state->blocks_averaged);
+        if (state->size == 0) {
+          const bool reset =
+              specbleach_reset_noise_profile(plug->lib_instance[channel]);
+          assert(reset);
+        } else {
+          const bool loaded = specbleach_load_noise_profile(
+              plug->lib_instance[channel], state->channels[channel],
+              state->size, state->blocks_averaged);
+          assert(loaded);
+        }
       }
     }
   }
 
-  for (uint32_t i = 0; i < nframes;) {
-    /* handle every events that happens at the frame "i" */
-    while (ev_index < nev && next_ev_frame == i) {
+  for (uint32_t i = 0; i < frame_count;) {
+    // handle every events that happens at the frame "i"
+    while (ev_index < ev_count && next_ev_frame == i) {
       const clap_event_header_t *hdr =
           process->in_events->get(process->in_events, ev_index);
       if (hdr->time != i) {
@@ -791,14 +861,14 @@ static clap_process_status process(const struct clap_plugin *plugin,
       process_event(plug, hdr);
       ++ev_index;
 
-      if (ev_index == nev) {
+      if (ev_index == ev_count) {
         // we reached the end of the event list
-        next_ev_frame = nframes;
+        next_ev_frame = frame_count;
         break;
       }
     }
 
-    /* process audio until the next event */
+    // process audio until the next event
     const uint32_t block_size = next_ev_frame - i;
 
     // Update the parameters struct for the spectral bleach instances
@@ -813,6 +883,9 @@ static clap_process_status process(const struct clap_plugin *plugin,
         .noise_rescale = plug->offset,
         .post_filter_threshold = plug->post_filter_threshold,
     };
+
+    if (plug->learn_noise != 0)
+      noise_profile_changed = true;
 
     for (uint32_t channel = 0; channel < plug->channel_count; ++channel) {
       specbleach_load_parameters(plug->lib_instance[channel], parameters);
@@ -840,7 +913,8 @@ static clap_process_status process(const struct clap_plugin *plugin,
   }
 
   // Store the noise profile
-  {
+  if (specbleach_noise_profile_available(plug->lib_instance[0]) &&
+      noise_profile_changed) {
     noise_profile_state *state =
         writable_noise_profile_state(&plug->current_noise_profile);
     state->size = specbleach_get_noise_profile_size(plug->lib_instance[0]);
